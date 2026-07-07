@@ -605,16 +605,11 @@ function getDashboardHeight(node, y = 0) {
 }
 
 function resizeDashboardWidgetIfNeeded(widget, node, y = 0) {
-    const desiredHeight = getDashboardHeight(node, y);
-    if (Math.abs(safeNumber(widget.height, 0) - desiredHeight) < 1) {
-        return desiredHeight;
-    }
-
-    widget.height = desiredHeight;
-    widget.computedHeight = desiredHeight;
-    node.graph?.setDirtyCanvas?.(true, true);
-    node.setDirtyCanvas?.(true, true);
-    return desiredHeight;
+    return Math.max(
+        DASHBOARD_MIN_HEIGHT,
+        safeNumber(widget?.computedHeight ?? widget?.height, DASHBOARD_MIN_HEIGHT),
+        getDashboardHeight(node, y)
+    );
 }
 
 function drawDashboard(ctx, node, widgetWidth, y, dashboardHeight, widget) {
