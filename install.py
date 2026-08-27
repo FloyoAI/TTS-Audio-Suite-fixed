@@ -15,11 +15,43 @@ import subprocess
 import sys
 import os
 import platform
+import importlib.machinery
+import importlib.util
+import hashlib
+import json
+import shutil
+import tempfile
+from pathlib import Path
 from typing import List, Optional
 
 
 class TTSAudioInstaller:
     """Intelligent installer for TTS Audio Suite with Python 3.13 compatibility"""
+
+    # Bump when the install procedure itself gains or changes dependencies.
+    # This keeps normal ComfyUI patch updates on the fast path.
+    INSTALL_STATE_VERSION = 2
+
+    CORE_MODULE_CHECKS = (
+        ("torch", "PyTorch"),
+        ("torchaudio", "TorchAudio"),
+        ("transformers", "Transformers"),
+        ("soundfile", "SoundFile"),
+        ("numpy", "NumPy"),
+        ("librosa", "Librosa"),
+        ("omegaconf", "OmegaConf"),
+    )
+
+    # These are the external engine runtimes installed or repaired by this
+    # script. Imports only verify package availability; they never load models.
+    ENGINE_RUNTIME_CHECKS = (
+        ("VibeVoice", ("vibevoice", "av")),
+        ("Echo-TTS", ("echo_tts",)),
+        ("OmniVoice", ("omnivoice",)),
+        ("Dots TTS", ("dots_tts.runtime",)),
+        ("DramaBox", ("av", "einops", "yaml")),
+        ("Fish Audio S2", ("fish_speech.inference_engine",)),
+    )
     
     def __init__(self):
         self.python_version = sys.version_info
@@ -29,6 +61,8 @@ class TTSAudioInstaller:
         self.is_m1_mac = self.is_macos and platform.machine() == "arm64"
         self.pip_cmd = [sys.executable, "-m", "pip"]
         self.russian_stress_fork_ref = "git+https://github.com/diodiogod/add-stress-to-epub.git@98f53b9"
+        self.engine_validation_results = {}
+        self.install_warnings = []
         
     def log(self, message: str, level: str = "INFO"):
         """Log installation progress with safe visual indicators"""
@@ -43,6 +77,11 @@ class TTSAudioInstaller:
         symbol = symbol_map.get(level, "[i]")
         print(f"{symbol} {message}")
 
+    def add_install_warning(self, description: str, detail: str):
+        """Record one concise warning without duplicating it in the summary."""
+        if not any(existing[0] == description for existing in self.install_warnings):
+            self.install_warnings.append((description, detail))
+
     def ensure_requirements_installed(self):
         """Check and install requirements.txt if needed"""
         self.log("Checking requirements.txt dependencies", "INFO")
@@ -52,8 +91,8 @@ class TTSAudioInstaller:
             self.log("requirements.txt not found - skipping", "WARNING")
             return
 
-        # Parse requirements.txt to get all package specs (without importing modules)
-        missing_packages = []
+        # Parse requirements.txt to get all package specs and detect both missing and incompatible versions.
+        packages_to_install = []
         package_specs = {}
         try:
             try:
@@ -102,19 +141,36 @@ class TTSAudioInstaller:
                         package_specs[normalized_name] = clean_line
 
                         try:
-                            version(package_name)
+                            installed_version = version(package_name)
+                            if req and req.specifier and installed_version not in req.specifier:
+                                packages_to_install.append(package_name)
                         except PackageNotFoundError:
-                            missing_packages.append(package_name)
+                            packages_to_install.append(package_name)
         except Exception as e:
             self.log(f"Error reading requirements.txt: {e}", "WARNING")
             return
 
-        if missing_packages:
-            self.log(f"Missing {len(missing_packages)} requirements.txt packages: {', '.join(missing_packages[:5])}{'...' if len(missing_packages) > 5 else ''}", "WARNING")
-            self.log("Installing missing requirements individually (preserves ComfyUI Manager safeguards)", "INFO")
+        # Preserve order but avoid duplicate installs if multiple requirement lines resolve to the same package.
+        deduped_packages_to_install = []
+        seen = set()
+        for package in packages_to_install:
+            normalized_name = canonicalize_name(package) if canonicalize_name else package
+            if normalized_name in seen:
+                continue
+            seen.add(normalized_name)
+            deduped_packages_to_install.append(package)
 
-            # Install each missing package individually using our safe method
-            for package in missing_packages:
+        if deduped_packages_to_install:
+            self.log(
+                f"Found {len(deduped_packages_to_install)} missing/outdated requirements.txt packages: "
+                f"{', '.join(deduped_packages_to_install[:5])}"
+                f"{'...' if len(deduped_packages_to_install) > 5 else ''}",
+                "WARNING"
+            )
+            self.log("Installing/upgrading requirements individually (preserves ComfyUI Manager safeguards)", "INFO")
+
+            # Install each missing/incompatible package individually using our safe method
+            for package in deduped_packages_to_install:
                 normalized_name = canonicalize_name(package) if canonicalize_name else package
                 package_spec = package_specs.get(normalized_name, package)
 
@@ -123,7 +179,7 @@ class TTSAudioInstaller:
             self.log("All requirements.txt dependencies already satisfied", "SUCCESS")
 
     def check_system_dependencies(self):
-        """Check for required system libraries and provide helpful error messages"""
+        """Check optional system libraries and provide helpful feature warnings."""
         if self.is_windows:
             return True  # Windows packages come pre-compiled
             
@@ -156,7 +212,7 @@ class TTSAudioInstaller:
         return False
 
     def check_macos_dependencies(self):
-        """Check for required system libraries on macOS"""
+        """Check for optional system libraries on macOS."""
         self.log("Checking macOS system dependencies...", "INFO")
         missing_deps = []
 
@@ -175,9 +231,9 @@ class TTSAudioInstaller:
             pass
         
         if missing_deps:
-            self.log("Missing system dependencies detected!", "WARNING")
+            self.log("Optional system dependencies are missing", "WARNING")
             print("\n" + "="*60)
-            print("MACOS SYSTEM DEPENDENCIES REQUIRED")
+            print("OPTIONAL MACOS SYSTEM DEPENDENCIES")
             print("="*60)
             for dep, purpose in missing_deps:
                 print(f"• {dep} (for {purpose})")
@@ -195,14 +251,18 @@ class TTSAudioInstaller:
                 print("Should show: arm64 (not x86_64)")
             
             print("="*60)
-            print("Then run this install script again.\n")
-            return False
-        
-        self.log("macOS system dependencies check passed", "SUCCESS")
+            print("Core TTS installation will continue; only the listed features may be unavailable.\n")
+            self.add_install_warning(
+                "Optional macOS audio libraries",
+                "Install the listed Homebrew packages to enable every audio feature.",
+            )
+
+        if not missing_deps:
+            self.log("macOS system dependencies check passed", "SUCCESS")
         return True
-    
+
     def check_linux_dependencies(self):
-        """Check for required system libraries on Linux"""
+        """Check for optional system libraries on Linux."""
         self.log("Checking Linux system dependencies...", "INFO")
         missing_deps = []
         
@@ -224,9 +284,9 @@ class TTSAudioInstaller:
             pass
         
         if missing_deps:
-            self.log("Missing system dependencies detected!", "WARNING")
+            self.log("Optional system dependencies are missing", "WARNING")
             print("\n" + "="*60)
-            print("LINUX SYSTEM DEPENDENCIES REQUIRED")
+            print("OPTIONAL LINUX SYSTEM DEPENDENCIES")
             print("="*60)
             for dep, purpose in missing_deps:
                 print(f"• {dep} (for {purpose})")
@@ -236,13 +296,21 @@ class TTSAudioInstaller:
             deps_list = " ".join([dep for dep, _ in missing_deps])
             print(f"sudo apt-get install {deps_list}")
             print("\n# Fedora/RHEL:")
-            fedora_deps = deps_list.replace('-dev', '-devel').replace('19', '')
+            fedora_packages = {
+                "libsamplerate0-dev": "libsamplerate-devel",
+                "portaudio19-dev": "portaudio-devel",
+            }
+            fedora_deps = " ".join(fedora_packages.get(dep, dep) for dep, _ in missing_deps)
             print(f"sudo dnf install {fedora_deps}")
             print("="*60)
-            print("Then run this install script again.\n")
-            return False
-        
-        self.log("Linux system dependencies check passed", "SUCCESS")
+            print("Core TTS installation will continue; only the listed features may be unavailable.\n")
+            self.add_install_warning(
+                "Optional Linux audio libraries",
+                "Install the listed system packages to enable every audio feature.",
+            )
+
+        if not missing_deps:
+            self.log("Linux system dependencies check passed", "SUCCESS")
         return True
 
     def run_pip_command(self, args: List[str], description: str, ignore_errors: bool = False) -> bool:
@@ -273,6 +341,7 @@ class TTSAudioInstaller:
                 error_msg = e.stderr.strip()
                 if len(error_msg) > 1000:
                     error_msg = f"...(last 1000 chars)...\n{error_msg[-1000:]}"
+                self.install_warnings.append((description, error_msg))
                 self.log(f"Warning: {description} failed (continuing anyway): {error_msg}", "WARNING")
                 return False
             else:
@@ -448,23 +517,129 @@ class TTSAudioInstaller:
             
             self.run_pip_command(pytorch_cmd_25, f"Installing PyTorch 2.5+ ({cuda_version} support)")
 
-    def verify_python_import(self, module_name: str) -> bool:
-        """Verify a module imports in the target Python environment."""
+    def module_available(self, module_name: str) -> bool:
+        """Check module presence without starting another Python process or importing it."""
         try:
-            result = subprocess.run(
-                [sys.executable, "-c", f"import {module_name}"],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            parts = module_name.split(".")
+            spec = importlib.util.find_spec(parts[0])
+            if spec is None:
+                return False
+
+            # util.find_spec() imports the parent when given a dotted name.
+            # Walk the package paths directly so presence checks stay side-effect free.
+            for index in range(1, len(parts)):
+                search_locations = spec.submodule_search_locations
+                if search_locations is None:
+                    return False
+                qualified_name = ".".join(parts[: index + 1])
+                spec = importlib.machinery.PathFinder.find_spec(
+                    qualified_name,
+                    search_locations,
+                )
+                if spec is None:
+                    return False
+            return True
+        except (ImportError, ModuleNotFoundError, AttributeError, ValueError):
+            return False
+
+    def _install_state_path(self) -> Path:
+        """Return the ignored, per-node state file used for idempotent updates."""
+        return Path(__file__).resolve().parent / ".cache" / "install_state.json"
+
+    def _install_state_fingerprint(self) -> str:
+        """Fingerprint installer logic and the active dependency environment."""
+        digest = hashlib.sha256()
+        digest.update(str(self.INSTALL_STATE_VERSION).encode("utf-8"))
+        digest.update(str(sys.executable).lower().encode("utf-8"))
+        digest.update(f"{self.python_version.major}.{self.python_version.minor}".encode("utf-8"))
+        digest.update(repr(self.ENGINE_RUNTIME_CHECKS).encode("utf-8"))
+
+        # An installer fix must be able to invalidate an old successful state
+        # without requiring users to know an environment variable.
+        digest.update(Path(__file__).resolve().read_bytes())
+
+        requirements_path = Path(__file__).resolve().parent / "requirements.txt"
+        if requirements_path.exists():
+            digest.update(requirements_path.read_bytes())
+            try:
+                from importlib.metadata import PackageNotFoundError, version
+                import re
+
+                for line in requirements_path.read_text(encoding="utf-8").splitlines():
+                    requirement = line.split("#", 1)[0].strip()
+                    if not requirement:
+                        continue
+                    package_name = re.split(r"[<>=!~;\s]", requirement, maxsplit=1)[0]
+                    try:
+                        installed_version = version(package_name)
+                    except PackageNotFoundError:
+                        installed_version = "<missing>"
+                    digest.update(f"{package_name}={installed_version}".encode("utf-8"))
+            except (OSError, ImportError):
+                digest.update(b"<dependency-version-scan-unavailable>")
+        return digest.hexdigest()
+
+    def _quick_installation_status(self):
+        """Check the small set of entry points needed to trust the install marker."""
+        missing = []
+        for module_name, display_name in self.CORE_MODULE_CHECKS:
+            if not self.module_available(module_name):
+                missing.append(display_name)
+
+        self.engine_validation_results = {}
+        for display_name, module_names in self.ENGINE_RUNTIME_CHECKS:
+            available = all(self.module_available(module_name) for module_name in module_names)
+            self.engine_validation_results[display_name] = available
+            if not available:
+                missing.append(display_name)
+        return missing
+
+    def can_skip_dependency_installation(self) -> bool:
+        """Avoid rerunning pip and engine setup when this environment is unchanged."""
+        if os.environ.get("TTS_AUDIO_SUITE_FORCE_INSTALL") == "1":
+            self.log("Forced installation requested by TTS_AUDIO_SUITE_FORCE_INSTALL", "WARNING")
+            return False
+
+        state_path = self._install_state_path()
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+
+        if state.get("fingerprint") != self._install_state_fingerprint():
+            return False
+
+        missing = self._quick_installation_status()
+        if missing:
+            self.log(
+                f"Install state found, but runtime checks need repair: {', '.join(missing)}",
+                "WARNING",
             )
-            if result.returncode == 0:
-                return True
-            error_text = (result.stderr or result.stdout or "unknown import failure").strip()
-            self.log(f"Python import check failed for {module_name}: {error_text}", "WARNING")
             return False
-        except Exception as e:
-            self.log(f"Python import check failed for {module_name}: {e}", "WARNING")
-            return False
+
+        self.log("Dependencies unchanged and runtime entry points are present - skipping package installation", "SUCCESS")
+        return True
+
+    def save_installation_state(self, installation_valid: bool):
+        """Persist only a successful dependency state for future fast updates."""
+        if not installation_valid:
+            return
+        state_path = self._install_state_path()
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": self._install_state_fingerprint(),
+                        "python": sys.executable,
+                        "engine_runtimes": list(self.engine_validation_results),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            self.log(f"Could not save installer state (continuing): {error}", "WARNING")
 
     def verify_faiss_installation(self) -> bool:
         """Verify FAISS imports and exposes the CPU APIs required by RVC index building."""
@@ -649,6 +824,8 @@ class TTSAudioInstaller:
         mac_audio_packages = [
             "soundfile>=0.12.0",
             "sounddevice>=0.4.0",
+            "pydub",
+            "webdataset",
         ]
         
         for package in mac_audio_packages:
@@ -671,7 +848,7 @@ class TTSAudioInstaller:
             "pypinyin", 
             "unidecode",
             "omegaconf>=2.3.0",
-            "transformers>=4.51.3,<=4.57.3",  # Required for VibeVoice compatibility. 5.0.0 breaks Qwen3-TTS tokenizers.
+            "transformers>=5.3.0,<6.0.0",  # Main environment for Higgs Audio v3 / Step Audio EditX / MOSS-TTS. Legacy T4 engines use isolated runtimes.
             
             # Bundled engine dependencies (safe)
             "conformer>=0.3.2",      # ChatterBox engine
@@ -686,6 +863,11 @@ class TTSAudioInstaller:
             # Basic utilities (safe)
             "requests",
             "dacite",
+            "safetensors>=0.6.2",       # Required by MOSS-TTS HF checkpoints
+            "orjson>=3.11.0",           # Required by MOSS-TTS remote code
+            "tiktoken>=0.12.0",         # Required by MOSS-TTS tokenizer
+            "fugashi>=1.4.0",            # IndexTTS-2.5 Japanese G2P
+            "unidic-lite>=1.0.8",        # IndexTTS-2.5 Japanese dictionary
             # NOTE: opencv-python and pillow installed via install_problematic_packages() with --no-deps
             # to prevent forced numpy/pillow downgrades
 
@@ -1019,6 +1201,7 @@ class TTSAudioInstaller:
             "descript-audio-codec", # Pulls unnecessary deps, conflicts with protobuf
             "descript-audiotools",  # Forces protobuf downgrade from 6.x to 3.19.x
             "cached-path",          # Forces package downgrades
+            "omnivoice",            # Keep shared dependency resolution under our control
             "torchcrepe",          # Conflicts via librosa dependency
             # NOTE: onnxruntime moved to install_onnxruntime_with_gpu_support() for smart GPU detection
             "opencv-python",       # Forces numpy downgrade from 2.x to 1.26.x - dependencies pre-installed
@@ -1055,26 +1238,6 @@ class TTSAudioInstaller:
                 self.log("Windows Fix: Install Visual C++ Build Tools or use a compatible Python version", "INFO")
                 self.log("This is often due to missing pre-built wheels for your Python version", "INFO")
 
-        vibevoice_deps = [
-            "aiortc",      # Audio/video real-time communication - safe to install
-            "pyee",        # Event emitter - lightweight
-            "dnspython",   # DNS toolkit - safe
-            "ifaddr",      # Network interface addresses - safe
-            "pylibsrtp",   # SRTP library - safe
-            "pyopenssl",   # OpenSSL wrapper - safe
-        ]
-        
-        self.log("Installing VibeVoice safe dependencies first", "INFO")
-        for dep in vibevoice_deps:
-            if self.check_package_installed(dep):
-                self.log(f"{dep} already satisfied - skipping", "SUCCESS")
-                continue
-            self.run_pip_command(
-                ["install", dep],
-                f"Installing {dep}",
-                ignore_errors=True
-            )
-        
         # Now install VibeVoice with --no-deps to prevent downgrades
         # NOTE: Using FushionHub fork temporarily - Microsoft removed the official repo
         # Original: https://github.com/microsoft/VibeVoice.git (no longer exists)
@@ -1110,6 +1273,207 @@ class TTSAudioInstaller:
                 "Installing Echo-TTS from GitHub (--no-deps)",
                 ignore_errors=True
             )
+
+    def install_dots_tts(self):
+        """Install official Dots TTS with minimal dependency impact."""
+        self.log("Installing Dots TTS engine", "INFO")
+
+        dependency_probes = [
+            ("lingua", ["install", "lingua-language-detector"], "Installing lingua-language-detector"),
+            ("langcodes", ["install", "langcodes"], "Installing langcodes"),
+            ("loguru", ["install", "loguru"], "Installing loguru"),
+            ("tn.chinese.normalizer", ["install", "WeTextProcessing"], "Installing WeTextProcessing"),
+        ]
+
+        for module_name, pip_args, description in dependency_probes:
+            if self.module_available(module_name):
+                self.log(f"{module_name} import already satisfied - skipping", "SUCCESS")
+                continue
+            if module_name == "tn.chinese.normalizer" and self.is_windows:
+                self.log(
+                    "WeTextProcessing/tn is unavailable on Windows; skipping the known pynini source build",
+                    "WARNING",
+                )
+                continue
+            self.run_pip_command(pip_args, description, ignore_errors=True)
+
+        if self.module_available("dots_tts.runtime") and self.module_available("tn.chinese.normalizer"):
+            self.log("dots_tts.runtime already satisfied - skipping", "SUCCESS")
+            return
+
+        if self.check_package_installed("dots.tts") and self.module_available("dots_tts.runtime"):
+            self.log(
+                "Dots package is installed but its tn/WeTextProcessing prerequisite is unavailable; skipping rebuild",
+                "WARNING",
+            )
+            return
+
+        dots_install_args = [
+            "install",
+            "git+https://github.com/rednote-hilab/dots.tts.git",
+            "--no-deps",
+        ]
+        if self.is_python_313:
+            # Dots currently declares <3.13, although its source works in the
+            # suite's tested Python 3.13 environment. Keep the existing stack
+            # and bypass only pip's metadata gate.
+            dots_install_args.insert(1, "--ignore-requires-python")
+            self.log(
+                "Python 3.13 detected - allowing the tested Dots source install despite its package metadata",
+                "WARNING",
+            )
+
+        self.run_pip_command(
+            dots_install_args,
+            "Installing official dots.tts from GitHub (--no-deps)",
+            ignore_errors=True
+        )
+
+    def install_fish_audio_s2(self):
+        """Install Fish S2 without changing the suite's core ML stack."""
+        self.log("Installing Fish Audio S2 support in the main T5 environment", "INFO")
+
+        # The adapter uses Fish's official inference_engine API. Pin the tested
+        # S2 release because distribution metadata alone cannot verify that API.
+        fish_repository = "https://github.com/fishaudio/fish-speech.git"
+        fish_revision = "v2.0.0-beta"
+        fish_runtime_module = "fish_speech.inference_engine"
+
+        packages = [
+            ("lightning", "lightning"),
+            ("pytorch_lightning", "pytorch-lightning"),
+            ("lightning_utilities", "lightning-utilities"),
+            ("torchmetrics", "torchmetrics"),
+            ("opencc", "opencc-python-reimplemented==0.1.7"),
+            ("ormsgpack", "ormsgpack"),
+            ("zstandard", "zstandard"),
+            ("pyrootutils", "pyrootutils"),
+            ("loralib", "loralib"),
+        ]
+        for module_name, package_name in packages:
+            if self.module_available(module_name):
+                self.log(f"{module_name} import already satisfied - skipping", "SUCCESS")
+                continue
+            self.run_pip_command(
+                ["install", package_name, "--no-deps"],
+                f"Installing Fish S2 dependency {package_name} (--no-deps)",
+                ignore_errors=True,
+            )
+
+        if self.module_available(fish_runtime_module):
+            self.log("Fish S2 inference runtime already satisfied - skipping", "SUCCESS")
+            return
+
+        if self.check_package_installed("fish-speech"):
+            self.log(
+                "fish-speech distribution is installed but the required Fish S2 inference runtime is missing - repairing",
+                "WARNING",
+            )
+
+        # The upstream beta pyproject packages only fish_speech itself, so its
+        # wheel omits fish_speech.inference_engine. Install the wheel for its
+        # metadata, then restore the complete official source package.
+        with tempfile.TemporaryDirectory(prefix="tts_fish_s2_") as temp_dir:
+            source_dir = Path(temp_dir) / "fish-speech"
+            env = os.environ.copy()
+            if self.is_windows:
+                env["PYTHONUTF8"] = "1"
+                env["PYTHONIOENCODING"] = "utf-8"
+
+            self.log("Downloading tested Fish S2 source revision...", "INSTALL")
+            try:
+                clone_result = subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        fish_revision,
+                        fish_repository,
+                        str(source_dir),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8" if self.is_windows else None,
+                    errors="replace" if self.is_windows else None,
+                    check=True,
+                    env=env,
+                )
+                if clone_result.stdout.strip():
+                    print(clone_result.stdout)
+            except (OSError, subprocess.CalledProcessError) as error:
+                details = getattr(error, "stderr", None) or str(error)
+                self.log(f"Fish S2 source download failed: {details.strip()}", "ERROR")
+            else:
+                installed = self.run_pip_command(
+                    ["install", "--upgrade", "--force-reinstall", str(source_dir), "--no-deps"],
+                    "Installing tested Fish S2 runtime from GitHub (--no-deps)",
+                    ignore_errors=True,
+                )
+                if installed:
+                    self._restore_fish_source_package(source_dir)
+
+        if self.module_available(fish_runtime_module):
+            self.log("Fish S2 inference runtime installed successfully", "SUCCESS")
+        else:
+            self.log(
+                "Fish S2 inference runtime is still unavailable after installation; Fish Audio S2 will not work until the package is repaired",
+                "ERROR",
+            )
+
+    def _restore_fish_source_package(self, source_dir: Path) -> bool:
+        """Restore Fish subpackages omitted by the upstream wheel metadata."""
+        source_package = source_dir / "fish_speech"
+        if not source_package.is_dir():
+            self.log("Fish S2 source checkout does not contain fish_speech", "ERROR")
+            return False
+
+        import site
+        import sysconfig
+
+        package_roots = list(sys.path)
+        package_roots.extend(site.getsitepackages())
+        package_roots.append(site.getusersitepackages())
+        package_roots.extend(
+            path
+            for path in (
+                sysconfig.get_paths().get("purelib"),
+                sysconfig.get_paths().get("platlib"),
+            )
+            if path
+        )
+
+        target_package = None
+        seen_roots = set()
+        for entry in package_roots:
+            if not entry or entry in seen_roots:
+                continue
+            seen_roots.add(entry)
+            candidate = Path(entry) / "fish_speech"
+            # Fish S2 is an implicit namespace package and intentionally has
+            # no fish_speech/__init__.py in the official source tree.
+            if candidate.is_dir():
+                target_package = candidate
+                break
+
+        if target_package is None:
+            self.log("Could not locate the active site-packages/fish_speech directory", "ERROR")
+            return False
+
+        try:
+            shutil.copytree(source_package, target_package, dirs_exist_ok=True)
+        except OSError as error:
+            self.log(f"Could not restore the Fish S2 source package: {error}", "ERROR")
+            return False
+
+        importlib.invalidate_caches()
+
+        self.log(
+            f"Restored complete Fish S2 source package in {target_package}",
+            "SUCCESS",
+        )
+        return True
 
     def install_f5tts_multilingual_support(self):
         """Install phonemization support for F5-TTS multilingual models (Polish, German, French, Spanish, etc.)"""
@@ -1406,45 +1770,63 @@ class TTSAudioInstaller:
         )
 
     def validate_installation(self):
-        """Validate that critical packages can be imported"""
+        """Validate package presence without importing heavyweight runtimes."""
         self.log("Validating installation...", "INFO")
-        
-        critical_imports = [
-            ("torch", "PyTorch"),
-            ("torchaudio", "TorchAudio"),
-            ("transformers", "Transformers"),
-            ("soundfile", "SoundFile"),
-            ("numpy", "NumPy"),
-            ("librosa", "Librosa"),
-            ("omegaconf", "OmegaConf")
-        ]
-        
+
         validation_errors = []
-        
-        for module_name, display_name in critical_imports:
-            try:
-                __import__(module_name)
+
+        for module_name, display_name in self.CORE_MODULE_CHECKS:
+            if self.module_available(module_name):
                 self.log(f"{display_name}: OK", "SUCCESS")
-            except ImportError as e:
-                validation_errors.append(f"{display_name}: {e}")
-                self.log(f"{display_name}: FAILED - {e}", "ERROR")
+            else:
+                validation_errors.append(f"{display_name}: module is unavailable")
+                self.log(f"{display_name}: FAILED - module is unavailable", "ERROR")
+
+        # Validate actual runtime entry points instead of relying on package
+        # distribution metadata. This is intentionally presence-only.
+        for display_name, module_names in self.ENGINE_RUNTIME_CHECKS:
+            missing_modules = [
+                module_name
+                for module_name in module_names
+                if not self.module_available(module_name)
+            ]
+            available = not missing_modules
+            self.engine_validation_results[display_name] = available
+            if available:
+                self.log(f"{display_name} runtime: OK", "SUCCESS")
+            else:
+                validation_errors.append(
+                    f"{display_name} runtime is unavailable ({', '.join(missing_modules)})"
+                )
+                self.log(
+                    f"{display_name} runtime: FAILED ({', '.join(missing_modules)})",
+                    "ERROR",
+                )
+
+        # Dots supplies a no-op normalizer when tn/WeTextProcessing is absent;
+        # this affects text normalization quality, not engine availability.
+        if not self.module_available("tn.chinese.normalizer"):
+            warning = "Dots TTS text normalization unavailable; Dots will use its built-in no-op fallback"
+            self.add_install_warning(
+                "Dots TTS text normalization (optional)",
+                warning,
+            )
+            self.log(warning, "WARNING")
         
         # Check Python 3.13 specific validations
         if self.is_python_313:
-            try:
-                import onnxruntime
+            if self.module_available("onnxruntime"):
                 self.log("ONNXRuntime (OpenSeeFace): OK", "SUCCESS")
-            except ImportError:
+            else:
                 validation_errors.append("ONNXRuntime required for OpenSeeFace on Python 3.13")
                 self.log("ONNXRuntime (OpenSeeFace): FAILED", "ERROR")
         
         # Check RVC dependencies
         rvc_modules = [("monotonic_alignment_search", "Monotonic Alignment Search")]
         for module_name, display_name in rvc_modules:
-            try:
-                __import__(module_name)
+            if self.module_available(module_name):
                 self.log(f"{display_name} (RVC): OK", "SUCCESS")
-            except ImportError:
+            else:
                 # RVC is optional, so this is just a warning
                 self.log(f"{display_name} (RVC): Not available - RVC voice conversion will not work", "WARNING")
         
@@ -1453,27 +1835,37 @@ class TTSAudioInstaller:
     def check_version_conflicts(self):
         """Check for known version conflicts"""
         self.log("Checking for version conflicts...", "INFO")
-        
+
         try:
-            import numpy
-            numpy_version = tuple(map(int, numpy.__version__.split('.')[:2]))
-            
+            from importlib.metadata import version, PackageNotFoundError
+            numpy_version_text = version("numpy")
+            numpy_version = tuple(map(int, numpy_version_text.split('.')[:2]))
+
             if numpy_version >= (2, 3):
-                self.log(f"WARNING: NumPy {numpy.__version__} detected - may cause numba conflicts", "WARNING")
+                self.log(f"WARNING: NumPy {numpy_version_text} detected - may cause numba conflicts", "WARNING")
                 self.log("Consider downgrading: pip install 'numpy>=2.2.0,<2.3.0'", "WARNING")
             else:
-                self.log(f"NumPy {numpy.__version__}: Version OK for compatibility", "SUCCESS")
-                
-        except ImportError:
+                self.log(f"NumPy {numpy_version_text}: Version OK for compatibility", "SUCCESS")
+
+        except (PackageNotFoundError, ImportError, ValueError):
             self.log("NumPy not found - this will cause issues", "ERROR")
 
-    def print_installation_summary(self):
+    def print_installation_summary(self, installation_valid: bool):
         """Print installation summary and next steps"""
         print("\n" + "="*70)
         print(" "*20 + "TTS AUDIO SUITE INSTALLATION")
         print("="*70)
-        
-        self.log("Installation completed successfully!", "SUCCESS")
+
+        if installation_valid:
+            if self.install_warnings:
+                self.log(
+                    f"Installation completed with {len(self.install_warnings)} warning(s)",
+                    "WARNING",
+                )
+            else:
+                self.log("Installation completed successfully!", "SUCCESS")
+        else:
+            self.log("Installation completed with errors - one or more required runtimes are unavailable", "ERROR")
         print(f"\n>>> Python version: {self.python_version.major}.{self.python_version.minor}.{self.python_version.micro}")
         if self.is_macos:
             print(f">>> Platform: macOS ({platform.machine()})")
@@ -1482,9 +1874,7 @@ class TTSAudioInstaller:
             print("\n" + "-"*50)
             print("   PYTHON 3.13 COMPATIBILITY STATUS")
             print("-"*50)
-            print("  [+] All TTS engines: WORKING")
-            print("      (ChatterBox, F5-TTS, Higgs Audio)")
-            print("  [+] RVC voice conversion: WORKING") 
+            print("  [+] Python 3.13 compatibility workarounds applied")
             print("  [+] OpenSeeFace mouth movement: WORKING (experimental)")
             print("  [+] Numba/Librosa compatibility: FIXED")
             print("      -> Automatic JIT disabling for Python 3.13")
@@ -1494,15 +1884,31 @@ class TTSAudioInstaller:
             print("   https://github.com/google-ai-edge/mediapipe/issues/5708")
         else:
             print("\n" + "-"*50)
-            print("   FULL COMPATIBILITY STATUS")
+            print("   CORE COMPATIBILITY STATUS")
             print("-"*50)
-            print("  [+] All TTS engines: WORKING")
-            print("  [+] RVC voice conversion: WORKING")
-            print("  [+] MediaPipe mouth movement: WORKING") 
-            print("  [+] OpenSeeFace mouth movement: WORKING")
+            print("  [+] Core compatibility checks completed")
+
+        print("\n" + "-"*50)
+        print("   EXTERNAL ENGINE RUNTIME CHECKS")
+        print("-"*50)
+        print("   Bundled and isolated engines use the core/shared runtime checks.")
+        for display_name, available in self.engine_validation_results.items():
+            status = "AVAILABLE" if available else "UNAVAILABLE"
+            marker = "+" if available else "X"
+            print(f"  [{marker}] {display_name}: {status}")
+
+        if self.install_warnings:
+            print("\n" + "-"*50)
+            print("   INSTALLATION WARNINGS")
+            print("-"*50)
+            for description, _ in self.install_warnings:
+                print(f"  [!] {description}")
         
         print("\n" + "="*70)
-        print(" "*15 + "READY TO USE TTS AUDIO SUITE IN COMFYUI!")
+        if installation_valid:
+            print(" "*15 + "READY TO USE TTS AUDIO SUITE IN COMFYUI!")
+        else:
+            print(" "*12 + "INSTALLATION NEEDS ATTENTION BEFORE USE")
         print("="*70)
 
         # Windows-specific note about text normalization
@@ -1528,39 +1934,47 @@ def main():
         
         # Check environment and system dependencies before proceeding
         installer.check_python_environment()
-        installer.ensure_requirements_installed()  # Ensure requirements.txt is installed first
-        
-        # Check system dependencies (Linux only)
-        if not installer.check_system_dependencies():
-            installer.log("System dependency check failed - aborting installation", "ERROR")
-            sys.exit(1)
-        
-        # Install in correct order to prevent conflicts
-        installer.install_pytorch_with_cuda()  # Install PyTorch first with proper CUDA detection
-        installer.install_core_dependencies()
-        installer.install_macos_specific_packages()  # Mac-specific package fixes
-        installer.install_numpy_with_constraints()
-        installer.install_audio_separator_if_compatible()  # Install audio-separator only if numpy>=2
-        installer.install_rvc_dependencies()
-        installer.install_gradio_and_opencv_dependencies()  # Pre-install deps before --no-deps
-        installer.install_problematic_packages()
-        installer.install_onnxruntime_with_gpu_support()  # Install ONNX with GPU acceleration if available
-        installer.install_vibevoice()  # Install VibeVoice with careful dependency management
-        installer.install_echo_tts()  # Install Echo-TTS with minimal dependency impact
-        installer.install_f5tts_multilingual_support()  # Install phonemization for Polish/multilingual F5-TTS
-        installer.install_indexts_text_processing()  # Install IndexTTS-2 text normalization with fallback
-        installer.install_russian_text_stresser_support()  # Install lightweight Russian stress package for Official 23-Lang
-        installer.handle_wandb_issues()  # Fix wandb circular import
-        installer.handle_python_313_specific()
+
+        if installer.can_skip_dependency_installation():
+            installer.log("No dependency changes detected; continuing with fast validation only", "INFO")
+        else:
+            installer.ensure_requirements_installed()  # Ensure requirements.txt is installed first
+
+            # Report optional system dependencies without blocking engine setup.
+            installer.check_system_dependencies()
+
+            # Install in correct order to prevent conflicts
+            installer.install_pytorch_with_cuda()  # Install PyTorch first with proper CUDA detection
+            installer.install_core_dependencies()
+            installer.install_macos_specific_packages()  # Mac-specific package fixes
+            installer.install_numpy_with_constraints()
+            installer.install_audio_separator_if_compatible()  # Install audio-separator only if numpy>=2
+            installer.install_rvc_dependencies()
+            installer.install_gradio_and_opencv_dependencies()  # Pre-install deps before --no-deps
+            installer.install_problematic_packages()
+            installer.install_onnxruntime_with_gpu_support()  # Install ONNX with GPU acceleration if available
+            installer.install_vibevoice()  # Install VibeVoice with careful dependency management
+            installer.install_echo_tts()  # Install Echo-TTS with minimal dependency impact
+            installer.install_dots_tts()  # Install official Dots TTS in the main environment first
+            installer.install_fish_audio_s2()  # Install Fish S2 without changing Torch/Transformers
+            installer.install_f5tts_multilingual_support()  # Install phonemization for Polish/multilingual F5-TTS
+            installer.install_indexts_text_processing()  # Install IndexTTS-2 text normalization with fallback
+            installer.install_russian_text_stresser_support()  # Install lightweight Russian stress package for Official 23-Lang
+            installer.handle_wandb_issues()  # Fix wandb circular import
+            installer.handle_python_313_specific()
         
         # Validation and summary
         installer.check_version_conflicts()
         success = installer.validate_installation()
-        installer.print_installation_summary()
-        
+        installer.save_installation_state(success)
+        installer.print_installation_summary(success)
+
         if not success:
-            installer.log("Installation completed with warnings - some features may not work", "WARNING")
+            installer.log("Installation finished with errors - review the failed runtime checks above", "ERROR")
             sys.exit(1)
+        elif installer.install_warnings:
+            installer.log("Installation finished with warnings - review the installation warnings above", "WARNING")
+            sys.exit(0)
         else:
             installer.log("Installation completed successfully!", "SUCCESS")
             sys.exit(0)

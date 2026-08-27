@@ -9,11 +9,18 @@ import importlib.util
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Callable
 
 
 class DependencyChecker:
     """Check for missing dependencies and provide helpful warnings."""
+
+    @staticmethod
+    def get_install_command() -> str:
+        """Return the suite installer command for the active ComfyUI Python."""
+        install_script = Path(__file__).resolve().parents[2] / "install.py"
+        return f'"{sys.executable}" "{install_script}"'
     
     # Core dependencies that should always be available
     CORE_DEPENDENCIES = [
@@ -109,9 +116,9 @@ class DependencyChecker:
         # Check core dependencies
         core_missing = DependencyChecker.check_core_dependencies()
         if core_missing:
-            report_lines.append("⚠️  CRITICAL: Missing core dependencies:")
+            report_lines.append("⚠️  Critical TTS Audio Suite components are not installed correctly:")
             for module_name, package_name in core_missing:
-                report_lines.append(f"   • {package_name} (import: {module_name})")
+                report_lines.append(f"   • {package_name}")
             report_lines.append("")
         
         # Check engine-specific dependencies
@@ -122,7 +129,7 @@ class DependencyChecker:
                 engine_issues[engine] = missing
         
         if engine_issues:
-            report_lines.append("⚠️  Engine-specific missing dependencies:")
+            report_lines.append("⚠️  Some TTS Audio Suite engines are not installed correctly:")
             for engine, missing_deps in engine_issues.items():
                 engine_display = {
                     'chatterbox': 'ChatterBox TTS',
@@ -133,16 +140,18 @@ class DependencyChecker:
                 
                 report_lines.append(f"   {engine_display}:")
                 for module_name, package_name in missing_deps:
-                    report_lines.append(f"     • {package_name} (import: {module_name})")
+                    report_lines.append(f"     • {package_name}")
             report_lines.append("")
         
         if core_missing or engine_issues:
-            report_lines.append("🔧 To fix: pip install -r requirements.txt")
-            report_lines.append("   Or install specific packages: pip install <package_name>")
-            
-            if engine_issues:
-                report_lines.append("")
-                report_lines.append("ℹ️  Note: Engine nodes will fail to load without their dependencies")
+            report_lines.extend([
+                "🔧 To repair the installation:",
+                "   1. Close ComfyUI.",
+                "   2. Open a terminal.",
+                "   3. Run this command:",
+                f"      {DependencyChecker.get_install_command()}",
+                "   4. Start ComfyUI again.",
+            ])
         
         return "\n".join(report_lines) if report_lines else ""
     
@@ -154,9 +163,9 @@ class DependencyChecker:
         # Check core dependencies
         core_missing = DependencyChecker.check_core_dependencies()
         if core_missing:
-            warnings.append("⚠️ Critical dependencies missing:")
+            warnings.append("⚠️ Critical TTS Audio Suite components are not installed correctly:")
             for module_name, package_name in core_missing:
-                warnings.append(f"   • {package_name} (import: {module_name})")
+                warnings.append(f"   • {package_name}")
         
         # Check engine-specific dependencies  
         engine_issues = {}
@@ -166,7 +175,7 @@ class DependencyChecker:
                 engine_issues[engine] = missing
         
         if engine_issues:
-            warnings.append("⚠️ Engine dependencies missing:")
+            warnings.append("⚠️ Some TTS Audio Suite engines are not installed correctly:")
             for engine, missing_deps in engine_issues.items():
                 engine_display = {
                     'chatterbox': 'ChatterBox TTS',
@@ -177,11 +186,17 @@ class DependencyChecker:
                 
                 warnings.append(f"   {engine_display}:")
                 for module_name, package_name in missing_deps:
-                    warnings.append(f"     • {package_name} (import: {module_name})")
+                    warnings.append(f"     • {package_name}")
         
         if core_missing or engine_issues:
-            warnings.append("🔧 Fix: pip install -r requirements.txt")
-            warnings.append("ℹ️ Engine nodes will fail without dependencies")
+            warnings.extend([
+                "🔧 To repair the installation:",
+                "   1. Close ComfyUI.",
+                "   2. Open a terminal.",
+                "   3. Run this command:",
+                f"      {DependencyChecker.get_install_command()}",
+                "   4. Start ComfyUI again.",
+            ])
         
         return warnings
 

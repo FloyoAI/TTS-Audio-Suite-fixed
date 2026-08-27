@@ -10,6 +10,8 @@ Session-scoped fixtures for ComfyUI server management and API testing.
 # ============================================================================
 import os
 import sys
+import tempfile
+import types
 from unittest.mock import MagicMock
 
 # Set testing environment
@@ -22,7 +24,6 @@ _MOCK_MODULES = [
     'comfy.model_management',
     'comfy.utils',
     'nodes',
-    'folder_paths',
     'server',
     'execution',
     'comfy_extras',
@@ -31,6 +32,31 @@ _MOCK_MODULES = [
 for _module_name in _MOCK_MODULES:
     if _module_name not in sys.modules:
         sys.modules[_module_name] = MagicMock()
+
+# folder_paths cannot be a raw MagicMock because code under test uses
+# folder_paths.models_dir in os.path.join/os.makedirs calls. A MagicMock there
+# creates junk folders like ./MagicMock/mock.models_dir/... on disk.
+if 'folder_paths' not in sys.modules:
+    mock_folder_paths = types.ModuleType("folder_paths")
+    mock_models_dir = tempfile.mkdtemp(prefix="tts_suite_test_models_")
+    mock_input_dir = tempfile.mkdtemp(prefix="tts_suite_test_input_")
+    mock_output_dir = tempfile.mkdtemp(prefix="tts_suite_test_output_")
+    mock_temp_dir = tempfile.mkdtemp(prefix="tts_suite_test_temp_")
+
+    mock_folder_paths.models_dir = mock_models_dir
+    mock_folder_paths.input_directory = mock_input_dir
+    mock_folder_paths.output_directory = mock_output_dir
+    mock_folder_paths.temp_directory = mock_temp_dir
+
+    mock_folder_paths.get_folder_paths = lambda *args, **kwargs: []
+    mock_folder_paths.add_model_folder_path = lambda *args, **kwargs: None
+    mock_folder_paths.get_input_directory = lambda: mock_input_dir
+    mock_folder_paths.get_output_directory = lambda: mock_output_dir
+    mock_folder_paths.get_temp_directory = lambda: mock_temp_dir
+    mock_folder_paths.get_annotated_filepath = lambda path: path
+    mock_folder_paths.exists_annotated_filepath = lambda path: os.path.exists(path)
+
+    sys.modules['folder_paths'] = mock_folder_paths
 
 # Now safe to import pytest and other modules
 import pytest
@@ -46,8 +72,15 @@ collect_ignore = ["__init__.py", "nodes.py"]
 
 # Path configuration
 CUSTOM_NODE_ROOT = Path(__file__).parent.parent  # tests/ -> TTS-Audio-Suite/
-COMFY_ROOT = CUSTOM_NODE_ROOT.parent.parent  # Navigate to Comfy-new
-VENV_PYTHON = COMFY_ROOT / "venv" / "Scripts" / "python.exe"  # Windows
+DEFAULT_COMFY_ROOT = CUSTOM_NODE_ROOT.parent.parent  # Navigate to Comfy-new
+COMFY_ROOT = Path(os.environ.get("TTS_SUITE_TEST_COMFY_ROOT", str(DEFAULT_COMFY_ROOT)))
+
+if os.name == "nt":
+    DEFAULT_VENV_PYTHON = COMFY_ROOT / "venv" / "Scripts" / "python.exe"
+else:
+    DEFAULT_VENV_PYTHON = COMFY_ROOT / "venv" / "bin" / "python"
+
+VENV_PYTHON = Path(os.environ.get("TTS_SUITE_TEST_VENV_PYTHON", str(DEFAULT_VENV_PYTHON)))
 
 
 class ComfyUIAPIClient:
@@ -144,7 +177,9 @@ def comfyui_server():
     print("\n🚀 Starting ComfyUI server for integration tests...")
     
     # Check if server is already running
-    server_url = "http://127.0.0.1:8188"
+    comfy_host = os.environ.get("TTS_SUITE_TEST_HOST", "127.0.0.1")
+    comfy_port = int(os.environ.get("TTS_SUITE_TEST_PORT", "8188"))
+    server_url = f"http://{comfy_host}:{comfy_port}"
     try:
         response = requests.get(f"{server_url}/system_stats", timeout=2)
         if response.status_code == 200:
@@ -154,21 +189,30 @@ def comfyui_server():
     except (requests.ConnectionError, requests.Timeout):
         pass  # Server not running, we'll start it
     
-    # Start ComfyUI in subprocess
+    # Start ComfyUI in subprocess with process group isolation and a clean env (no COMFYUI_TESTING)
+    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    server_env = os.environ.copy()
+    server_env.pop("COMFYUI_TESTING", None)
+    server_env.pop("PYTEST_CURRENT_TEST", None)
+
+    log_path = CUSTOM_NODE_ROOT / "tests" / "comfyui_server.log"
+    log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+
     process = subprocess.Popen(
         [
             str(VENV_PYTHON),
             "main.py",
-            "--listen", "127.0.0.1",
-            "--port", "8188",
+            "--listen", comfy_host,
+            "--port", str(comfy_port),
             "--disable-auto-launch",
             "--cpu"  # Use CPU for faster startup in tests
         ],
         cwd=str(COMFY_ROOT),
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
+        creationflags=creation_flags,
+        preexec_fn=os.setsid if sys.platform != "win32" else None,
+        env=server_env
     )
     
     # Wait for server to be ready
@@ -191,8 +235,9 @@ def comfyui_server():
         # Try to get any error output
         process.terminate()
         try:
-            stdout, _ = process.communicate(timeout=5)
-            error_lines = stdout[-2000:] if stdout else "No output"
+            log_file.close()
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                error_lines = f.read()[-2000:]
         except Exception:
             error_lines = "Could not capture output"
         
@@ -201,18 +246,27 @@ def comfyui_server():
             f"Last output:\n{error_lines}"
         )
     
-    yield {"url": server_url, "process": process, "external": False}
-    
-    # Teardown
-    if process and process.poll() is None:
-        print("\n🛑 Shutting down ComfyUI server...")
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        print("✅ Server stopped")
+    try:
+        yield {"url": server_url, "process": process, "external": False}
+    finally:
+        # Teardown
+        if process and process.poll() is None:
+            print("\n🛑 Shutting down ComfyUI server...")
+            if sys.platform == "win32":
+                process.terminate()
+            else:
+                try:
+                    import signal
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            print("✅ Server stopped")
+        log_file.close()
 
 
 @pytest.fixture

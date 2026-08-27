@@ -11,6 +11,33 @@ This document tracks updates applied to our bundled IndexTTS-2 code from the ups
 
 ---
 
+## 2026-08-11: IndexTTS-2.5 Version Integration
+
+**Official sources:** `index-tts/index-tts` commit `b5ea881bec284b72f0b1cc04e0a724ff0c6b93e9`; model snapshot `ba2480d9f7f629eb18f6acaebb357679d9ba88a4`
+
+### Changes applied
+
+- Added IndexTTS-2.5 as a selectable version of the existing `index_tts` engine.
+- Bundled the official 25 Hz semantic codec, multilingual tokenizer, Japanese G2P, and NeMo normalization bridge.
+- Preserved suite dual-source audio plus vector/text emotion blending.
+- Added Chinese, English, Japanese, Spanish, and Arabic conditioning.
+- Added the official 2.5-only `duration_factor`, documented honestly as nearest-neighbor internal semantic-feature scaling rather than natural prosody or exact-duration planning.
+- Deliberately excluded IndexTTS-2.5 from TTS SRT's native-duration option; the suite-owned exact-seconds extrapolation was removed after source and listening review.
+- Kept legacy IndexTTS-2 checkpoints, FP16 loading, MaskGCT, workflows, and node identity intact.
+- Pinned the audited Hugging Face model revision and retained the main Transformers 5 environment.
+- Added model-aware Text/SRT processor and audio-cache identities so switching 2.0/2.5 or a 2.5 generation parameter cannot reuse stale output.
+- Documented the suite's manual finding that 2.5 is not a universal cloning-quality upgrade: 2.0 may retain speaker resemblance better under strong different-speaker emotion transfer.
+
+### Validation status
+
+- [x] Python compilation
+- [x] Bundled backend import under `TTS_SUITE_TEST_VENV_PYTHON`
+- [x] Full checkpoint download and live ComfyUI generation
+- [x] Manual audio-quality review of the official duration factor and 2.0/2.5 speaker resemblance
+- [x] Live 2.5 → 2.0 model switching after processor-cache invalidation fix
+
+---
+
 ## 2025-09-18: Major Update - Cache & Emotion Improvements
 
 **Reference commit range:** `8336824..64cb31a` (September 11 → September 18, 2025)
@@ -204,6 +231,47 @@ This document tracks updates applied to our bundled IndexTTS-2 code from the ups
 - All custom logging and error handling in infer_v2.py and throughout
 - Custom model initialization sequence
 - Custom emotion vector normalization and processing
+
+---
+
+---
+
+## 2026-07-11: Upstream Audit Before Release
+
+**Upstream repository checked:** `index-tts/index-tts` (`main`)
+**Upstream head observed:** `b5bd657` (2026-07-08)
+**Check performed:** 2026-07-11
+
+### Relevant upstream changes reviewed
+
+| Commit | Upstream change | Bundled status | Release action |
+|---|---|---|---|
+| `843972e` | Coerce QwenEmotion JSON emotion scores to `float` and reject non-numeric values clearly | **Applied** in bundled `clamp_score()` | Run a text-emotion generation with numeric-string classifier output |
+| `b154a1b` | WebUI text/vector preset save/load management | **Already covered differently** by the ComfyUI-native preset manager and `emotion_presets.json` integration | No direct port needed |
+| `b5bd657` | Expose `--accel` and `--torch-compile`, add optional acceleration extras and WebUI settings | **Applied selectively**; suite now forwards `use_accel` into the bundled GPT path, while retaining ComfyUI-owned dependency handling | Validate acceleration fallback on compatible and non-accelerated setups |
+| `7264ce2` | Improve IndexTTS-2 model resource checks and HF cache handling | **Suite-owned downloader differs** and needs a separate comparison if download failures are reported | No blind copy into bundled code |
+
+### Findings
+
+- No upstream change was found that invalidates the current eight-emotion vector order,
+  Qwen text-emotion syntax, audio-reference blending, or the suite's inline tag format.
+- The upstream QwenEmotion string-score fix is directly relevant to the suite's text-emotion
+  path and should be applied before a release.
+- The upstream acceleration work is not a drop-in replacement because this repository
+  bundles and adapts IndexTTS-2. The suite already contains the acceleration modules, but
+  `utils/models/unified_model_interface.py` should be checked so `use_accel` reaches the
+  bundled `IndexTTS2` constructor.
+- Upstream WebUI presets are not copied verbatim: the suite's ComfyUI editor has a richer
+  vector/radar, inline-tag, sidebar, and filesystem preset implementation.
+
+### Release follow-up checklist
+
+- [x] Apply the upstream `clamp_score()` numeric coercion.
+- [x] Pass `use_accel` through the unified IndexTTS-2 factory; validate fallback behavior.
+- [ ] Run a Qwen text-emotion generation using numeric-string classifier output.
+- [ ] Verify acceleration flags on a compatible CUDA installation and on a setup without
+      optional acceleration dependencies.
+- [ ] Recheck bundled model-resource validation against the current upstream `check` logic.
 
 ---
 

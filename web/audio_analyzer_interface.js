@@ -1,8 +1,10 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 import { AudioAnalyzerInterface } from "./audio_analyzer_core.js";
 
 // Simple execution tracking
 let audioAnalyzerNodes = new Map();
+let analyzerRefreshTimers = [];
 
 // Hook into ComfyUI's global execution completion
 if (window.app && window.app.ui && window.app.ui.queue) {
@@ -29,6 +31,26 @@ if (window.app && window.app.ui && window.app.ui.queue) {
         return originalProcessComplete.call(this, prompt_id, results);
     };
 }
+
+function refreshAnalyzerSidecars() {
+    for (const node of audioAnalyzerNodes.values()) {
+        if (!node.audioAnalyzerInterface || typeof node.tryWebFileData !== 'function') continue;
+        node.tryWebFileData();
+    }
+}
+
+function scheduleAnalyzerSidecarRefresh() {
+    analyzerRefreshTimers.forEach(timer => clearTimeout(timer));
+    analyzerRefreshTimers = [250, 1000, 2000].map(delay => setTimeout(refreshAnalyzerSidecars, delay));
+}
+
+api.addEventListener("executed", () => {
+    scheduleAnalyzerSidecarRefresh();
+});
+
+api.addEventListener("execution_success", () => {
+    scheduleAnalyzerSidecarRefresh();
+});
 
 // Basic execution handler
 function handleNodeExecution(message) {
@@ -83,6 +105,11 @@ app.registerExtension({
                     if (nodeData.class_type === "ChatterBoxAudioAnalyzer") {
                         // Inject the node_id into the inputs object
                         nodeData.inputs.node_id = nodeId;
+                        const graphNode = app.graph?.getNodeById?.(Number(nodeId)) || app.graph?._nodes_by_id?.[nodeId];
+                        if (graphNode?.audioAnalyzerForceRun) {
+                            nodeData.inputs.force_run_id = String(graphNode.audioAnalyzerForceRun);
+                            graphNode.audioAnalyzerForceRun = "";
+                        }
                     }
                 }
             }
@@ -162,19 +189,14 @@ app.registerExtension({
             // Additional widget persistence backup - ensure values persist on workflow load
             const onSerialize = nodeType.prototype.onSerialize;
             nodeType.prototype.onSerialize = function(info) {
-                const result = onSerialize ? onSerialize.apply(this, arguments) : undefined;
-                
-                // Ensure widget values are properly serialized
-                if (!result) {
-                    return result;
+                if (onSerialize) {
+                    onSerialize.apply(this, arguments);
                 }
-                
+
                 // Force widget values to be saved correctly
                 if (this.widgets && this.widgets.length > 0) {
-                    result.widgets_values = this.widgets.map(w => w.value);
+                    info.widgets_values = this.widgets.map(w => w.value);
                 }
-                
-                return result;
             };
             
             // Override onExecuted to capture data immediately
@@ -219,6 +241,8 @@ app.registerExtension({
                 const result = onExecuted ? onExecuted.apply(this, arguments) : undefined;
                 if (this.audioAnalyzerInterface) {
                     handleNodeExecution.call(this, message);
+                    setTimeout(() => this.tryWebFileData?.(), 250);
+                    setTimeout(() => this.tryWebFileData?.(), 1000);
                 }
                 return result;
             };
@@ -227,7 +251,14 @@ app.registerExtension({
             const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
             nodeType.prototype.onDrawBackground = function(ctx) {
                 const result = originalOnDrawBackground ? originalOnDrawBackground.apply(this, arguments) : undefined;
-                
+
+                if (this.audioAnalyzerInterface) {
+                    const canvasChanged = this.audioAnalyzerInterface.resizeCanvas(false);
+                    if (canvasChanged) {
+                        requestAnimationFrame(() => this.audioAnalyzerInterface?.visualization?.redraw());
+                    }
+                }
+
                 // Check if we just executed and have new output data
                 if (this.lastExecutionTime && Date.now() - this.lastExecutionTime < 1000) {
                     // Recently executed, try to get fresh output data
@@ -339,8 +370,8 @@ app.registerExtension({
                 let urlIndex = 0;
                 const tryNextTempUrl = () => {
                     if (urlIndex >= possibleTempUrls.length) {
-                        console.log('⚠️ All temp file URLs failed, falling back to test data');
-                        this.generateTestData();
+                        console.log('⚠️ All temp file URLs failed, checking persistent cache');
+                        this.tryFetchTempData();
                         return;
                     }
                     
@@ -398,8 +429,12 @@ app.registerExtension({
                 let urlIndex = 0;
                 const tryNextUrl = () => {
                     if (urlIndex >= possibleCacheUrls.length) {
-                        console.log('💾 All cache URLs failed, generating test data');
-                        this.generateTestData();
+                        console.warn('💾 All cache URLs failed; no real analyzer data is available yet');
+                        if (this.audioAnalyzerInterface) {
+                            this.audioAnalyzerInterface.ui.updateStatus('No cached analysis data');
+                            this.audioAnalyzerInterface.showMessage('No cached analysis data found. Queue the workflow once to regenerate analyzer data.');
+                            this.audioAnalyzerInterface.visualization.redraw();
+                        }
                         return;
                     }
                     
@@ -417,8 +452,8 @@ app.registerExtension({
                             console.log('🎉 Cache file loaded successfully!');
                             console.log('🎉 Cache data keys:', Object.keys(data));
                             
-                            if (data.visualization_data) {
-                                const vizData = data.visualization_data;
+                            const vizData = data.visualization_data || data;
+                            if (vizData?.waveform?.samples?.length) {
                                 console.log('🎉 REAL DATA FOUND! Duration:', vizData.duration);
                                 
                                 if (this.audioAnalyzerInterface) {
@@ -441,42 +476,6 @@ app.registerExtension({
                 };
                 
                 tryNextUrl();
-            };
-            
-            // Generate test data
-            nodeType.prototype.generateTestData = function() {
-                console.log('⚠️ GENERATING FAKE TEST DATA - Real data fetch failed');
-                const testData = {
-                    waveform: { samples: [], time: [] },
-                    rms: { values: [], time: [] },
-                    peaks: [1.0, 3.5, 6.2, 8.8],
-                    duration: 10.79,
-                    sample_rate: 22050,
-                    regions: [
-                        { start: 0.2, end: 2.1, label: "Speech 1", confidence: 0.92 },
-                        { start: 2.5, end: 4.8, label: "Speech 2", confidence: 0.88 },
-                        { start: 5.2, end: 8.1, label: "Speech 3", confidence: 0.85 },
-                        { start: 8.6, end: 10.5, label: "Speech 4", confidence: 0.90 }
-                    ]
-                };
-                
-                // Generate sine wave
-                for (let i = 0; i < 2000; i++) {
-                    const time = (i / 2000) * 10.79;
-                    const sample = Math.sin(2 * Math.PI * 440 * time) * 0.5;
-                    testData.waveform.samples.push(sample);
-                    testData.waveform.time.push(time);
-                }
-                
-                // Generate RMS
-                for (let i = 0; i < 200; i++) {
-                    const time = (i / 200) * 10.79;
-                    const rms = Math.abs(Math.sin(2 * Math.PI * 2 * time)) * 0.3;
-                    testData.rms.values.push(rms);
-                    testData.rms.time.push(time);
-                }
-                
-                handleNodeExecution.call(this, [null, JSON.stringify(testData)]);
             };
             
             // Setup audio playback

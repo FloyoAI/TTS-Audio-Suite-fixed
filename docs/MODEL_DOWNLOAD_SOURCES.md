@@ -38,7 +38,7 @@ Use this as the canonical list of model repositories/links for offline setup.
 
 | Component | Source | Size | Auto-Download | Notes |
 |---|---|---|---|---|
-| Official 23-Lang (v1/v2) | [ResembleAI/chatterbox](https://huggingface.co/ResembleAI/chatterbox) | ~4.3GB | ✅ | v1 + v2 files and tokenizer |
+| Official 23-Lang (v1/v2/v3) | [ResembleAI/chatterbox](https://huggingface.co/ResembleAI/chatterbox) | ~4.3GB | ✅ | v1 + v2 + v3 T3 checkpoints with shared tokenizer, voice encoder, and S3Gen |
 | Russian stress dictionary (Russian only) | [Vuizur/add-stress-to-epub release](https://github.com/Vuizur/add-stress-to-epub/releases/download/v1.0.1/russian_dict.zip) | ~1.5GB | ✅ | Auxiliary Official 23-Lang Russian stress-labeling data; downloads on demand only when Russian stress support is used |
 | Vietnamese (Viterbox) | [dolly-vn/viterbox](https://huggingface.co/dolly-vn/viterbox) | ~4.3GB | ✅ | Vietnamese community finetune used by downloader |
 | Egyptian Arabic (oddadmix) | [oddadmix/chatterbox-egyptian-v0](https://huggingface.co/oddadmix/chatterbox-egyptian-v0) | ~4.3GB | ✅ | Egyptian Arabic community finetune (architecture v2) |
@@ -59,11 +59,18 @@ Use this as the canonical list of model repositories/links for offline setup.
 | higgs-audio-v2-3B | [bosonai/higgs-audio-v2-generation-3B-base](https://huggingface.co/bosonai/higgs-audio-v2-generation-3B-base) | ~9GB | ✅ | Generation model |
 | Audio tokenizer | [bosonai/higgs-audio-v2-tokenizer](https://huggingface.co/bosonai/higgs-audio-v2-tokenizer) | ~200MB | ✅ | Tokenizer model |
 
-## IndexTTS-2
+## Higgs Audio v3
+
+| Component | Source | Size | Auto-Download | Notes |
+|---|---|---|---|---|
+| higgs-audio-v3-tts-4b | [bosonai/higgs-audio-v3-tts-4b](https://huggingface.co/bosonai/higgs-audio-v3-tts-4b) | ~8GB | ✅ | Official 4B multilingual controllable TTS model |
+
+## IndexTTS 2 / 2.5
 
 | Component | Source | Size | Auto-Download | Notes |
 |---|---|---|---|---|
 | IndexTTS-2 | [IndexTeam/IndexTTS-2](https://huggingface.co/IndexTeam/IndexTTS-2) | Multiple files | ✅ | Main TTS engine |
+| IndexTTS-2.5 | [IndexTeam/IndexTTS-2.5](https://huggingface.co/IndexTeam/IndexTTS-2.5) | ~5.49GB | ✅ | Multilingual backend with bundled codec and official feature-duration scaling |
 | w2v-bert-2.0 | [facebook/w2v-bert-2.0](https://huggingface.co/facebook/w2v-bert-2.0) | ~2GB | ✅ | Semantic feature extractor |
 | qwen0.6bemo4-merge | Included with IndexTTS-2 | Included | ✅ | Text emotion model bundle |
 
@@ -90,6 +97,8 @@ Use this as the canonical list of model repositories/links for offline setup.
 | Component | Source | Size | Auto-Download | Notes |
 |---|---|---|---|---|
 | granite-4.0-1b-speech | [ibm-granite/granite-4.0-1b-speech](https://huggingface.co/ibm-granite/granite-4.0-1b-speech) | ~4.6GB | ✅ | Main Granite ASR / AST model |
+| granite-speech-4.1-2b | [ibm-granite/granite-speech-4.1-2b](https://huggingface.co/ibm-granite/granite-speech-4.1-2b) | ~4.6GB | ✅ | Granite Speech 4.1 2B multilingual model (supports Japanese) |
+| granite-speech-4.1-2b-plus | [ibm-granite/granite-speech-4.1-2b-plus](https://huggingface.co/ibm-granite/granite-speech-4.1-2b-plus) | ~4.6GB | ✅ | Plus variant supporting native speaker diarization and word-level timestamps |
 | Qwen3-ForcedAligner-0.6B | [Qwen/Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B) | N/A | ✅ | Optional custom word-level timestamps/SRT path; reused from Qwen folder |
 
 ## Step Audio EditX
@@ -105,6 +114,53 @@ Use this as the canonical list of model repositories/links for offline setup.
 |---|---|---|---|---|
 | echo-tts-base (model + PCA state) | [jordand/echo-tts-base](https://huggingface.co/jordand/echo-tts-base) | ~5.3GB | ✅ | pytorch_model.safetensors + pca_state.safetensors |
 | fish-s1-dac-min (audio codec) | [jordand/fish-s1-dac-min](https://huggingface.co/jordand/fish-s1-dac-min) | ~1.8GB | ✅ | pytorch_model.safetensors — audio codec required by Echo-TTS |
+
+## Fish Audio S2 Pro
+
+| Component | Source | Size | Auto-Download | Notes |
+|---|---|---|---|---|
+| S2 Pro | [fishaudio/s2-pro](https://huggingface.co/fishaudio/s2-pro) | ~10.3GB | ✅ | Official 4B model and codec; BNB INT8/NF4 are optional load-time quantization modes that reuse these files; non-commercial license |
+| S2 Pro FP8 | [drbaph/s2-pro-fp8](https://huggingface.co/drbaph/s2-pro-fp8) | ~8.0GB | ✅ | Community weight-only FP8 checkpoint; BF16 activations; RTX 4090/5090-class CUDA GPU required |
+
+## Dots TTS
+
+| Component | Source | Size | Auto-Download | Notes |
+|---|---|---|---|---|
+| dots.tts-base | [rednote-hilab/dots.tts-base](https://huggingface.co/rednote-hilab/dots.tts-base) | ~6GB | ✅ | Official base checkpoint with tokenizer, vocoder, speaker encoder, and latent stats |
+| dots.tts-soar | [rednote-hilab/dots.tts-soar](https://huggingface.co/rednote-hilab/dots.tts-soar) | ~6GB | ✅ | Official SOAR checkpoint for higher-quality zero-shot cloning |
+| dots.tts-mf | [rednote-hilab/dots.tts-mf](https://huggingface.co/rednote-hilab/dots.tts-mf) | ~6GB | ✅ | Official MeanFlow-distilled checkpoint for faster inference |
+
+## DramaBox
+
+| Component | Source | Size | Auto-Download | Notes |
+|---|---|---|---|---|
+| DramaBox DiT + audio components | [ResembleAI/Dramabox](https://huggingface.co/ResembleAI/Dramabox) | ~8.5GB | ✅ | Official merged DramaBox transformer and LTX audio VAE/vocoder components |
+| Gemma 3 12B 4-bit text encoder | [unsloth/gemma-3-12b-it-bnb-4bit](https://huggingface.co/unsloth/gemma-3-12b-it-bnb-4bit) | ~7.8GB | ✅ | Official pre-quantized text encoder; loaded locally with no HF cache fallback |
+
+## OmniVoice
+
+| Component | Source | Size | Auto-Download | Notes |
+|---|---|---|---|---|
+| OmniVoice | [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | ~3.7GB | ✅ | Official main model including bundled audio_tokenizer assets |
+
+## MOSS-TTS
+
+| Component | Source | Size | Auto-Download | Notes |
+|---|---|---|---|---|
+| MOSS-TTS-Local-Transformer | [OpenMOSS-Team/MOSS-TTS-Local-Transformer](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer) | ~6.1GB | ✅ | Official 1.7B local-transformer model |
+| MOSS-TTS | [OpenMOSS-Team/MOSS-TTS](https://huggingface.co/OpenMOSS-Team/MOSS-TTS) | ~17GB | ✅ | Official 8B delay model |
+| MOSS-TTS-v1.5 | [OpenMOSS-Team/MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) | ~17GB | ✅ | Current official 8B delay model with 31 languages and more stable voice cloning |
+| MOSS-TTS v1.5 Voice Acting 8B (Community - LAION) | [laion/moss-tts-v1.5-8b-voice-acting](https://huggingface.co/laion/moss-tts-v1.5-8b-voice-acting) | ~17GB | ✅ | Third-party full MOSS-TTS v1.5 fine-tune for expressive voice acting; not an official OpenMOSS model |
+| MOSS-VoiceGenerator | [OpenMOSS-Team/MOSS-VoiceGenerator](https://huggingface.co/OpenMOSS-Team/MOSS-VoiceGenerator) | ~4.2GB | ✅ | Official 1.7B reference-free voice-design model |
+| MOSS-TTSD-v1.0 | [OpenMOSS-Team/MOSS-TTSD-v1.0](https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v1.0) | ~18GB | ✅ | Official 8B native multi-speaker dialogue model |
+| MOSS-SoundEffect | [OpenMOSS-Team/MOSS-SoundEffect](https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect) | ~17GB | ✅ | Official MOSS v1 prompt-only sound-effect checkpoint; uses the shared MOSS audio tokenizer |
+| MOSS-Audio-Tokenizer | [OpenMOSS-Team/MOSS-Audio-Tokenizer](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer) | ~8.5GB | ✅ | Shared official codec required by MOSS-TTS |
+
+## MOSS-SoundEffect v2
+
+| Component | Source | Size | Auto-Download | Notes |
+|---|---|---|---|---|
+| MOSS-SoundEffect-v2.0 | [OpenMOSS-Team/MOSS-SoundEffect-v2.0](https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0) | ~11.2GB | ✅ | Official DiT + DAC VAE + Qwen3 text-encoder sound-effect pipeline |
 
 ## RVC
 

@@ -3,26 +3,43 @@
  * Draws directly on ComfyUI canvas - no DOM positioning issues
  */
 
-export function createEmotionRadarCanvasWidget(node) {
+import {
+    exportEmotionConfiguration,
+    importEmotionConfiguration,
+    showEmotionFeedback
+} from "./emotion_radar_export.js";
+
+export const INDEX_TTS_EMOTION_VISUALS = [
+    { name: 'Happy', color: '#FFD700', angle: 0 },
+    { name: 'Surprised', color: '#FF69B4', angle: Math.PI / 4 },
+    { name: 'Angry', color: '#FF4500', angle: Math.PI / 2 },
+    { name: 'Disgusted', color: '#8B4513', angle: 3 * Math.PI / 4 },
+    { name: 'Sad', color: '#4169E1', angle: Math.PI },
+    { name: 'Afraid', color: '#9370DB', angle: 5 * Math.PI / 4 },
+    { name: 'Calm', color: '#20B2AA', angle: 3 * Math.PI / 2 },
+    { name: 'Melancholic', color: '#708090', angle: 7 * Math.PI / 4 }
+];
+
+export function createEmotionRadarCanvasWidget(node, options = {}) {
     const WIDGET_HEIGHT = 350; // Increased to prevent overflow
+    const modernControls = options.modernControls === true;
+    const controlButtonWidth = modernControls ? 68 : 50;
+    const controlButtonSpacing = modernControls ? 6 : 8;
+    const controlButtonMargin = modernControls ? 8 : 10;
 
     // Emotion configuration
-    const emotions = [
-        { name: 'Happy', color: '#FFD700', angle: 0 },
-        { name: 'Surprised', color: '#FF69B4', angle: Math.PI / 4 },
-        { name: 'Angry', color: '#FF4500', angle: Math.PI / 2 },
-        { name: 'Disgusted', color: '#8B4513', angle: 3 * Math.PI / 4 },
-        { name: 'Sad', color: '#4169E1', angle: Math.PI },
-        { name: 'Afraid', color: '#9370DB', angle: 5 * Math.PI / 4 },
-        { name: 'Calm', color: '#20B2AA', angle: 3 * Math.PI / 2 },
-        { name: 'Melancholic', color: '#708090', angle: 7 * Math.PI / 4 }
-    ];
+    const emotions = INDEX_TTS_EMOTION_VISUALS;
 
     // Current emotion values
     const emotionValues = {};
     emotions.forEach(emotion => {
         emotionValues[emotion.name] = 0.0;
     });
+
+    const getEmotionSign = (emotionName) => {
+        const sign = options.getEmotionSign?.(emotionName);
+        return sign === -1 ? -1 : 1;
+    };
 
     // Chart configuration
     const centerX = 160;
@@ -263,68 +280,47 @@ export function createEmotionRadarCanvasWidget(node) {
     }
 
     function importEmotionConfig() {
-        // Try to read from clipboard first
-        if (navigator.clipboard && navigator.clipboard.readText) {
-            navigator.clipboard.readText().then(text => {
-                processImportedText(text);
-            }).catch(err => {
-                console.log("Clipboard read failed, falling back to prompt:", err);
-                fallbackImportPrompt();
-            });
-        } else {
-            // Fallback for browsers without clipboard API
-            fallbackImportPrompt();
-        }
-    }
-
-    function fallbackImportPrompt() {
-        const importedText = prompt(
-            "Paste your emotion configuration (JSON format):\n\n" +
-            "Example:\n" +
-            '{\n  "Happy": 0.5,\n  "Angry": 0.3,\n  ...\n}'
-        );
-
-        if (importedText) {
-            processImportedText(importedText);
-        }
+        importEmotionConfiguration(processImportedText);
     }
 
     function processImportedText(text) {
         try {
             const config = JSON.parse(text.trim());
 
-            // Validate that it's an object
-            if (typeof config !== 'object' || config === null) {
-                throw new Error("Configuration must be a JSON object");
+            if (typeof config !== "object" || config === null || Array.isArray(config)) {
+                return { ok: false, message: "Configuration must be a JSON object." };
             }
 
-            let importedCount = 0;
-            const validEmotions = emotions.map(e => e.name);
+            const validEmotionNames = new Set(emotions.map(emotion => emotion.name));
+            const entries = Object.entries(config);
+            if (!entries.length) {
+                return { ok: false, message: "Configuration must contain at least one emotion value." };
+            }
 
-            // Apply valid emotion values
-            validEmotions.forEach(emotionName => {
-                if (config.hasOwnProperty(emotionName)) {
-                    const value = parseFloat(config[emotionName]);
-                    if (!isNaN(value)) {
-                        const clampedValue = Math.max(0.0, Math.min(1.2, value));
-                        setEmotionValue(emotionName, clampedValue);
-                        importedCount++;
-                    }
+            for (const [emotionName, value] of entries) {
+                if (!validEmotionNames.has(emotionName)) {
+                    return { ok: false, message: `Unknown emotion: ${emotionName}.` };
                 }
+                if (typeof value !== "number" || !Number.isFinite(value)) {
+                    return { ok: false, message: `${emotionName} must be a number.` };
+                }
+                if (value < 0.0 || value > 1.2) {
+                    return { ok: false, message: `${emotionName} must be between 0.0 and 1.2.` };
+                }
+            }
+
+            entries.forEach(([emotionName, value]) => {
+                setEmotionValue(emotionName, value);
             });
 
-            if (importedCount > 0) {
-                console.log(`🎭 Successfully imported ${importedCount} emotion values`);
-                // Force redraw
-                if (node.graph && node.graph.setDirtyCanvas) {
-                    node.graph.setDirtyCanvas(true);
-                }
-            } else {
-                alert("No valid emotion values found in the imported configuration.");
+            console.log(`🎭 Successfully imported ${entries.length} emotion values`);
+            showEmotionFeedback(`Imported ${entries.length} emotion vector${entries.length === 1 ? "" : "s"}.`);
+            if (node.graph && node.graph.setDirtyCanvas) {
+                node.graph.setDirtyCanvas(true);
             }
-
+            return { ok: true };
         } catch (error) {
-            alert(`Import failed: ${error.message}\n\nPlease check that you've copied a valid JSON emotion configuration.`);
+            return { ok: false, message: `Invalid JSON: ${error.message}` };
         }
     }
 
@@ -332,13 +328,33 @@ export function createEmotionRadarCanvasWidget(node) {
     function drawRadarChart(ctx, width, widgetY) {
         const chartY = widgetY + 10;
 
-        // Clear background
+        // Fixed-size node with a clipped canvas: no drawing can escape the
+        // radar widget even if an older workflow has an unusual node size.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, widgetY, width, WIDGET_HEIGHT);
+        ctx.clip();
+
         ctx.fillStyle = '#1a1a1a';
         ctx.fillRect(0, chartY, width, WIDGET_HEIGHT);
-
-        // Save context
-        ctx.save();
         ctx.translate(0, chartY);
+
+        // Contextual delta editors may mark individual axes as negative.
+        // Keep the emotion palette intact while tinting the negative side red.
+        emotions.forEach(emotion => {
+            if (getEmotionSign(emotion.name) >= 0 || emotionValues[emotion.name] <= 0) return;
+            const halfSector = Math.PI / 8;
+            const canvasAngle = emotion.angle - Math.PI / 2;
+            const negativeGradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, maxRadius);
+            negativeGradient.addColorStop(0, 'rgba(255, 70, 85, 0.04)');
+            negativeGradient.addColorStop(1, 'rgba(255, 70, 85, 0.24)');
+            ctx.beginPath();
+            ctx.moveTo(centerX, centerY);
+            ctx.arc(centerX, centerY, maxRadius + 8, canvasAngle - halfSector, canvasAngle + halfSector);
+            ctx.closePath();
+            ctx.fillStyle = negativeGradient;
+            ctx.fill();
+        });
 
         // Draw grid circles
         ctx.strokeStyle = '#333333';
@@ -369,6 +385,22 @@ export function createEmotionRadarCanvasWidget(node) {
             ctx.stroke();
             ctx.globalAlpha = 1.0;
 
+            const isNegative = getEmotionSign(emotion.name) < 0 && emotionValues[emotion.name] > 0;
+            if (isNegative) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.moveTo(centerX, centerY);
+                ctx.lineTo(endPoint.x, endPoint.y);
+                ctx.strokeStyle = '#ff4655';
+                ctx.lineWidth = 3;
+                ctx.globalAlpha = 0.78;
+                ctx.setLineDash([5, 4]);
+                ctx.shadowColor = '#ff4655';
+                ctx.shadowBlur = 7;
+                ctx.stroke();
+                ctx.restore();
+            }
+
             // Draw emotion label with click effects
             const labelPoint = polarToCartesian(centerX, centerY, maxRadius + 20, emotion.angle);
 
@@ -391,6 +423,16 @@ export function createEmotionRadarCanvasWidget(node) {
             ctx.textBaseline = 'middle';
             ctx.fillText(emotion.name, labelPoint.x, labelPoint.y);
 
+            if (isNegative) {
+                ctx.save();
+                ctx.font = 'bold 11px Arial';
+                ctx.fillStyle = '#ff5b68';
+                ctx.shadowColor = '#ff4655';
+                ctx.shadowBlur = 6;
+                ctx.fillText('−', labelPoint.x, labelPoint.y + 14);
+                ctx.restore();
+            }
+
             // Clear shadow for subsequent drawing
             if (hasGlow) {
                 ctx.shadowBlur = 0;
@@ -400,7 +442,8 @@ export function createEmotionRadarCanvasWidget(node) {
             if (clickedLabel === emotion && emotionClickCounts[emotion.name] > 0) {
                 ctx.font = '9px Arial';
                 ctx.fillStyle = '#ffffff';
-                const increaseText = `+${(emotionClickCounts[emotion.name] * 0.1).toFixed(1)}`;
+                const direction = getEmotionSign(emotion.name) < 0 ? '-' : '+';
+                const increaseText = `${direction}${(emotionClickCounts[emotion.name] * 0.1).toFixed(1)}`;
                 ctx.fillText(increaseText, labelPoint.x, labelPoint.y + 15);
             }
 
@@ -450,14 +493,16 @@ export function createEmotionRadarCanvasWidget(node) {
 
                 const isClicked = clickedEmotion === emotion;
                 const isBeingDragged = isDragging && clickedEmotion === emotion;
+                const isNegative = getEmotionSign(emotion.name) < 0;
 
                 // Show glow effect when clicked or dragging
                 if (isClicked || isBeingDragged) {
                     const glowRadius = isBeingDragged ? 12 : 10;
                     const gradient = ctx.createRadialGradient(point.x, point.y, 0, point.x, point.y, glowRadius);
-                    gradient.addColorStop(0, emotion.color);
-                    gradient.addColorStop(0.6, emotion.color + '80');
-                    gradient.addColorStop(1, emotion.color + '00');
+                    const glowColor = isNegative ? '#ff4655' : emotion.color;
+                    gradient.addColorStop(0, glowColor);
+                    gradient.addColorStop(0.6, glowColor + '80');
+                    gradient.addColorStop(1, glowColor + '00');
 
                     ctx.fillStyle = gradient;
                     ctx.beginPath();
@@ -471,6 +516,15 @@ export function createEmotionRadarCanvasWidget(node) {
                 ctx.beginPath();
                 ctx.arc(point.x, point.y, handleRadius, 0, 2 * Math.PI);
                 ctx.fill();
+
+                if (isNegative) {
+                    ctx.strokeStyle = '#ff4655';
+                    ctx.lineWidth = 3;
+                    ctx.shadowColor = '#ff4655';
+                    ctx.shadowBlur = 8;
+                    ctx.stroke();
+                    ctx.shadowBlur = 0;
+                }
 
                 // Inner highlight
                 ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
@@ -505,28 +559,52 @@ export function createEmotionRadarCanvasWidget(node) {
     function drawButtons(ctx, width) {
         // Position buttons at bottom with proper spacing
         const buttonY = WIDGET_HEIGHT - 30;
-        const buttonWidth = 50;
+        const buttonWidth = controlButtonWidth;
         const buttonHeight = 20;
-        const spacing = 8;
+        const spacing = controlButtonSpacing;
+        const margin = controlButtonMargin;
+
+        if (modernControls) {
+            const drawModernButton = (x, label) => {
+                ctx.beginPath();
+                ctx.roundRect(x, buttonY, buttonWidth, buttonHeight, 4);
+                ctx.fillStyle = '#25272c';
+                ctx.fill();
+                ctx.strokeStyle = '#555a64';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.fillStyle = '#d9dbe1';
+                ctx.font = '9px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(label, x + buttonWidth / 2, buttonY + buttonHeight / 2);
+            };
+            const rightButtonX = width - 2 * buttonWidth - spacing - margin;
+            drawModernButton(margin, '⤨  Random');
+            drawModernButton(margin + buttonWidth + spacing, '↻  Reset');
+            drawModernButton(rightButtonX, '⇩  Export');
+            drawModernButton(rightButtonX + buttonWidth + spacing, '⇧  Import');
+            return;
+        }
 
         // Left side buttons
         // Random button
         ctx.fillStyle = '#4ecdc4';
-        ctx.fillRect(10, buttonY, buttonWidth, buttonHeight);
+        ctx.fillRect(margin, buttonY, buttonWidth, buttonHeight);
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 9px Arial';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('Random', 10 + buttonWidth/2, buttonY + buttonHeight/2);
+        ctx.fillText('Random', margin + buttonWidth/2, buttonY + buttonHeight/2);
 
         // Reset button
         ctx.fillStyle = '#ff6b6b';
-        ctx.fillRect(10 + buttonWidth + spacing, buttonY, buttonWidth, buttonHeight);
+        ctx.fillRect(margin + buttonWidth + spacing, buttonY, buttonWidth, buttonHeight);
         ctx.fillStyle = '#ffffff';
-        ctx.fillText('Reset', 10 + buttonWidth + spacing + buttonWidth/2, buttonY + buttonHeight/2);
+        ctx.fillText('Reset', margin + buttonWidth + spacing + buttonWidth/2, buttonY + buttonHeight/2);
 
         // Right side buttons (to avoid Sad label overlap)
-        const rightButtonX = width - 2*(buttonWidth + spacing) - 10;
+        const rightButtonX = width - 2*(buttonWidth + spacing) - margin;
 
         // Export button (right side)
         ctx.fillStyle = '#45b7d1';
@@ -557,16 +635,20 @@ export function createEmotionRadarCanvasWidget(node) {
             return [width || 320, WIDGET_HEIGHT];
         },
 
-        draw: function(ctx, node, widget_width, y, widget_height) {
+        draw: function(ctx, node, widget_width, y, widget_height, lowQuality) {
             this.y = y;
             this.lastWidth = widget_width;
+            if (lowQuality) {
+                this.isVisible = false;
+                return;
+            }
             this.isVisible = true;
             syncFromWidgets();
             drawRadarChart(ctx, widget_width, y);
         },
 
         mouse: function(event, pos, node) {
-            if (!pos) return false;
+            if (!this.isVisible || !pos) return false;
 
             const localX = pos[0];
             const localY = pos[1] - this.y - 10; // Adjust for chart offset
@@ -606,25 +688,26 @@ export function createEmotionRadarCanvasWidget(node) {
 
                 // Check button clicks with new positioning
                 const buttonY = WIDGET_HEIGHT - 30;
-                const buttonWidth = 50;
-                const spacing = 8;
-                const rightButtonX = this.lastWidth - 2*(buttonWidth + spacing) - 10;
+                const buttonWidth = controlButtonWidth;
+                const spacing = controlButtonSpacing;
+                const margin = controlButtonMargin;
+                const rightButtonX = this.lastWidth - 2*(buttonWidth + spacing) - margin;
 
                 if (localY >= buttonY && localY <= buttonY + 20) {
-                    if (localX >= 10 && localX <= 10 + buttonWidth) {
+                    if (localX >= margin && localX <= margin + buttonWidth) {
                         // Random button (left side)
                         emotions.forEach(emotion => {
                             setEmotionValue(emotion.name, Math.random() * 1.2);
                         });
                         return true;
-                    } else if (localX >= 10 + buttonWidth + spacing && localX <= 10 + 2*buttonWidth + spacing) {
+                    } else if (localX >= margin + buttonWidth + spacing && localX <= margin + 2*buttonWidth + spacing) {
                         // Reset button (left side)
                         emotions.forEach(emotion => {
                             setEmotionValue(emotion.name, 0.0);
                         });
                         return true;
                     } else if (localX >= rightButtonX && localX <= rightButtonX + buttonWidth) {
-                        // Export button - copy emotion configuration to clipboard
+                        // Export button - open selectable JSON
                         const config = {
                             "Happy": emotionValues["Happy"],
                             "Angry": emotionValues["Angry"],
@@ -636,28 +719,7 @@ export function createEmotionRadarCanvasWidget(node) {
                             "Melancholic": emotionValues["Melancholic"]
                         };
 
-                        const configText = JSON.stringify(config, null, 2);
-
-                        // Try to copy to clipboard
-                        if (navigator.clipboard && navigator.clipboard.writeText) {
-                            navigator.clipboard.writeText(configText).then(() => {
-                                console.log("🎭 Emotion configuration copied to clipboard");
-                                // Show brief success feedback by temporarily changing button color
-                                setTimeout(() => {
-                                    // Force a redraw to show feedback
-                                    if (node.graph && node.graph.setDirtyCanvas) {
-                                        node.graph.setDirtyCanvas(true);
-                                    }
-                                }, 50);
-                            }).catch((err) => {
-                                console.error("Failed to copy to clipboard:", err);
-                                // Fallback to alert
-                                alert(`Emotion Configuration (copied to clipboard failed):\n\n${configText}`);
-                            });
-                        } else {
-                            // Fallback for browsers without clipboard API
-                            alert(`Emotion Configuration:\n\n${configText}\n\nCopy this text manually.`);
-                        }
+                        exportEmotionConfiguration(config);
                         return true;
                     } else if (localX >= rightButtonX + buttonWidth + spacing && localX <= rightButtonX + 2*buttonWidth + spacing) {
                         // Import button (right side) - load emotion configuration from clipboard

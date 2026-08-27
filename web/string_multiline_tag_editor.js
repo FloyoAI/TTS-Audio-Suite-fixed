@@ -18,6 +18,8 @@ import { buildInlineEditSection } from "./widget-inline-edit-section.js";
 import { SRTTimingDragController, buildSRTTimingMarkup } from "./string_multiline_tag_editor_timing_drag.js";
 import { SRTCueEditController, buildSRTCueNumberMarkup } from "./string_multiline_tag_editor_srt_cue_ops.js";
 import { findTextMatches, replaceMatches } from "./string_multiline_tag_editor_find_replace.js";
+import { openIndexTTSEmotionEditor, openIndexTTSEmotionPresetPicker, parseVectorTag, isEmotionTextTag } from "./index_tts_emotion_tag_popup.js";
+import { openCharacterAliasManager } from "./character_alias_manager_ui.js";
 
 
 // Counter to ensure unique storage keys even when node.id is -1
@@ -87,10 +89,15 @@ function addStringMultilineTagEditorWidget(node) {
     let isConfigured = false; // Flag to know if onConfigure already loaded the state
     let hasSetInitialValue = false; // Track if we've set the initial workflow value
     let onConfigureCallCount = 0; // Track how many times onConfigure has been called
+    let syncInlineEngineSelection = () => {};
 
     // Create a temporary state to check default text
     const defaultState = new EditorState();
     const defaultText = defaultState.text;
+    node.properties = node.properties || {};
+    if (node.properties.ttsTagEditorInlineEngine && !state.activeInlineTagEngine) {
+        state.activeInlineTagEngine = node.properties.ttsTagEditorInlineEngine;
+    }
 
     // Create main editor container (this will be THE widget)
     const editorContainer = document.createElement("div");
@@ -145,7 +152,8 @@ function addStringMultilineTagEditorWidget(node) {
         const max = Number(input.max || 100);
         const value = Number(input.value || min);
         const ratio = max > min ? ((value - min) / (max - min)) * 100 : 0;
-        input.style.background = `linear-gradient(90deg, rgba(0, 225, 174, 0.88) 0%, rgba(0, 225, 174, 0.88) ${ratio}%, rgba(53, 53, 52, 0.9) ${ratio}%, rgba(53, 53, 52, 0.9) 100%)`;
+        const fillColor = input.dataset.fillColor || "rgba(0, 225, 174, 0.88)";
+        input.style.background = `linear-gradient(90deg, ${fillColor} 0%, ${fillColor} ${ratio}%, rgba(53, 53, 52, 0.9) ${ratio}%, rgba(53, 53, 52, 0.9) 100%)`;
     };
 
     const topBar = document.createElement("div");
@@ -642,7 +650,7 @@ function addStringMultilineTagEditorWidget(node) {
     // Initialize with text
     editor.textContent = state.text;
 
-    const INTERNAL_MARKER_PATTERN = /(?:\x00)?(?:NUM_START(?:_\d+)?|NUM_END|SRT_START|SRT_END|TAG_START|TAG_END|EDIT_START|EDIT_END|COMMA_START|COMMA_END|PERIOD_START|PERIOD_END|PUNCT_START|PUNCT_END|SPACE_START|SPACE_END)(?:\x00)?/g;
+    const INTERNAL_MARKER_PATTERN = /(?:\x00)?(?:NUM_START(?:_\d+)?|NUM_END|SRT_START|SRT_END|TAG_START|TAG_END|EDIT_START|EDIT_END|COMMA_START|COMMA_END|PERIOD_START|PERIOD_END|PUNCT_START|PUNCT_END|SPACE_START|SPACE_END|QUOTE_START|QUOTE_END)(?:\x00)?/g;
 
     const stripInternalMarkers = (text) => text.replace(INTERNAL_MARKER_PATTERN, "");
     const stripResidualMarkerArtifacts = (text) => stripInternalMarkers(text).replace(/\x00/g, "");
@@ -693,6 +701,7 @@ function addStringMultilineTagEditorWidget(node) {
                 }
 
                 const tagSpan = document.createElement("span");
+                tagSpan.className = "string-multiline-tag-editor-tag-token";
                 tagSpan.style.color = "#38d7ae";
                 tagSpan.style.fontWeight = "700";
                 tagSpan.textContent = match[0];
@@ -911,6 +920,9 @@ function addStringMultilineTagEditorWidget(node) {
         const endPoint = resolveEditorPoint(endPos);
 
         if (!startPoint || !endPoint) {
+            return;
+        }
+        if (!document.contains(startPoint.node) || !document.contains(endPoint.node)) {
             return;
         }
 
@@ -1229,11 +1241,23 @@ function addStringMultilineTagEditorWidget(node) {
             '\x00TAG_START\x00$1\x00TAG_END\x00'
         );
 
-        // Highlight inline edit tags (angle brackets) - magenta
-        html = html.replace(
-            /(<[^<>\r\n]+>)/g,
-            '\x00EDIT_START\x00$1\x00EDIT_END\x00'
-        );
+        const activeInlineEngine = state.activeInlineTagEngine || "step_audio_editx";
+
+        // Highlight inline edit tags with engine-aware warnings.
+        html = html.replace(/(<[^<>\r\n]+>)/g, (tag) => {
+            const analysis = TagUtilities.analyzeInlineTag(tag);
+            if ((analysis.engines || new Set()).size === 0) {
+                return `\x00EDIT_INVALID\x00${tag}\x00EDIT_END\x00`;
+            }
+            if (!(analysis.engines || new Set()).has(activeInlineEngine)) {
+                return `\x00EDIT_FOREIGN\x00${tag}\x00EDIT_END\x00`;
+            }
+            return `\x00EDIT_START\x00${tag}\x00EDIT_END\x00`;
+        });
+
+        // Highlight complete straight or curly quoted spans. Quoted values
+        // inside parameter/inline tags retain the stronger tag highlighting.
+        html = SyntaxHighlighter.markQuotedSpans(html);
 
         // Highlight commas - green
         html = html.replace(/,/g, '\x00COMMA_START\x00,\x00COMMA_END\x00');
@@ -1257,12 +1281,15 @@ function addStringMultilineTagEditorWidget(node) {
         html = html
             .replace(/\x00NUM_START_(\d+)\x00(.*?)\x00NUM_END\x00/g, (_, cueIndex, cueNumber) => buildSRTCueNumberMarkup(cueNumber, Number(cueIndex)))
             .replace(/\x00SRT_START\x00(.*?)\x00SRT_END\x00/g, (_, timingText) => buildSRTTimingMarkup(stripInternalMarkers(timingText).replace(/&gt;/g, ">"), timingHandleIndex++))
-            .replace(/\x00TAG_START\x00(.*?)\x00TAG_END\x00/g, '<span style="color: #38d7ae; font-weight: 700;">$1</span>')
-            .replace(/\x00EDIT_START\x00(.*?)\x00EDIT_END\x00/g, '<span style="color: #a6d700; font-weight: 700;">$1</span>')
+            .replace(/\x00TAG_START\x00(.*?)\x00TAG_END\x00/g, '<span class="string-multiline-tag-editor-tag-token" style="color: #38d7ae; font-weight: 700;">$1</span>')
+            .replace(/\x00EDIT_INVALID\x00(.*?)\x00EDIT_END\x00/g, '<span class="string-multiline-tag-editor-tag-token" style="color: #ff5555; font-weight: 700; text-decoration: underline wavy #ff5555;">$1</span>')
+            .replace(/\x00EDIT_FOREIGN\x00(.*?)\x00EDIT_END\x00/g, '<span class="string-multiline-tag-editor-tag-token" style="color: #e67e22; font-weight: 700; text-decoration: underline wavy #e67e22;">$1</span>')
+            .replace(/\x00EDIT_START\x00(.*?)\x00EDIT_END\x00/g, '<span class="string-multiline-tag-editor-tag-token" style="color: #a6d700; font-weight: 700;">$1</span>')
             .replace(/\x00COMMA_START\x00(.*?)\x00COMMA_END\x00/g, '<span style="color: #7bd6a7; font-weight: bold;">$1</span>')
             .replace(/\x00PERIOD_START\x00(.*?)\x00PERIOD_END\x00/g, '<span style="color: #e3be69; font-weight: bold;">$1</span>')
             .replace(/\x00PUNCT_START\x00(.*?)\x00PUNCT_END\x00/g, '<span style="color: #f0a1a1;">$1</span>')
-            .replace(/\x00SPACE_START\x00(.*?)\x00SPACE_END\x00/g, '<span style="background: #2a2a2a; color: #eee;">$1</span>');
+            .replace(/\x00SPACE_START\x00(.*?)\x00SPACE_END\x00/g, '<span style="background: #2a2a2a; color: #eee;">$1</span>')
+            .replace(/\x00QUOTE_START\x00(.*?)\x00QUOTE_END\x00/g, '<span class="string-multiline-tag-editor-quote-token">$1</span>');
 
         // Safety net: if any placeholder token survives the replacement chain,
         // strip it before the editor HTML is rendered.
@@ -1487,6 +1514,7 @@ function addStringMultilineTagEditorWidget(node) {
         if (v !== undefined) {
             widget.value = v;
         }
+        syncInlineEngineSelection();
     };
 
     // Hook into node's onConfigure to load workflow values
@@ -1496,6 +1524,11 @@ function addStringMultilineTagEditorWidget(node) {
         onConfigureCallCount++;
         const result = originalOnConfigure(info);
 
+        if (info?.properties?.ttsTagEditorInlineEngine) {
+            node.properties.ttsTagEditorInlineEngine = info.properties.ttsTagEditorInlineEngine;
+            state.activeInlineTagEngine = info.properties.ttsTagEditorInlineEngine;
+        }
+
         // Load workflow value when onConfigure is called (user opened a file)
         if (info && Array.isArray(info.widgets_values) && info.widgets_values[0]) {
             const workflowValue = info.widgets_values[0];
@@ -1503,27 +1536,16 @@ function addStringMultilineTagEditorWidget(node) {
             // Try to load full state from localStorage first (includes history)
             const savedState = EditorState.loadFromLocalStorage(storageKey);
             if (savedState && savedState.text && savedState.history && savedState.history.length > 0) {
-                // We have localStorage with history - this means we had local edits
+                // Preserve local text/history on same-workflow reloads.
                 Object.assign(state, savedState);
 
-                // Use onConfigureCallCount to distinguish reload from new workflow
-                // First call = initial load, preserve localStorage (it's either reload or user edits)
-                // Subsequent calls = file opened or workflow reloaded, reset if text changed
-                if (onConfigureCallCount === 1) {
-                    // First time seeing this node - keep the loaded history
-                    // Just make sure text matches workflow so they're in sync
+                const savedWorkflowValue = savedState.lastWorkflowValue || "";
+                const workflowChanged = !!savedWorkflowValue && workflowValue !== savedWorkflowValue;
+
+                if (workflowChanged) {
                     state.text = workflowValue;
-                } else {
-                    // Subsequent calls - check if workflow changed
-                    if (state.lastWorkflowValue && workflowValue !== state.lastWorkflowValue) {
-                        // Workflow value changed - user opened a different file
-                        state.text = workflowValue;
-                        state.history = [{text: workflowValue, caretPos: 0}];
-                        state.historyIndex = 0;
-                    } else {
-                        // Workflow unchanged or first time tracking it - preserve history (page reload)
-                        state.text = workflowValue;
-                    }
+                    state.history = [{ text: workflowValue, caretPos: 0 }];
+                    state.historyIndex = 0;
                 }
 
                 state.lastWorkflowValue = workflowValue;
@@ -1537,13 +1559,27 @@ function addStringMultilineTagEditorWidget(node) {
                 state.lastWorkflowValue = workflowValue;
             }
 
-            widget.value = workflowValue;
+            syncInlineEngineSelection();
+            widget.value = state.text;
             historyStatus.textContent = state.getHistoryStatus();
             isConfigured = true; // Mark that we've configured from workflow
             hasSetInitialValue = true; // Mark that we've set the initial value from workflow
         }
 
         return result;
+    };
+
+    const originalOnSerialize = node.onSerialize?.bind(node);
+    node.onSerialize = function(info) {
+        if (originalOnSerialize) {
+            originalOnSerialize(info);
+        }
+        const serialized = info || {};
+        serialized.properties = serialized.properties || {};
+        serialized.properties.ttsTagEditorInlineEngine = state.activeInlineTagEngine || node.properties?.ttsTagEditorInlineEngine || "step_audio_editx";
+        if (this.widgets && this.widgets.length > 0) {
+            serialized.widgets_values = this.widgets.map((w) => w.value);
+        }
     };
 
     // Set initial node size on creation
@@ -1558,7 +1594,11 @@ function addStringMultilineTagEditorWidget(node) {
     const { historySection, undoBtn, redoBtn, historyStatus } = historyData;
     historySection.classList.add("string-multiline-tag-editor-history");
 
-    const charData = buildCharacterSection(state, storageKey);
+    const charData = buildCharacterSection(state, storageKey, () => {
+        openCharacterAliasManager({
+            onUpdated: () => charData.refreshCharacters(),
+        });
+    });
     const { charSection, charSelect, charInput, addCharBtn } = charData;
     charSection.classList.add("string-multiline-tag-editor-panel-section");
 
@@ -1589,15 +1629,24 @@ function addStringMultilineTagEditorWidget(node) {
 
     // Build inline edit section
     const inlineEditData = buildInlineEditSection(state, storageKey);
-    const {
-        inlineEditSection,
-        paraSelect, paraIterSlider, addParaBtn,
-        emotionSelect, emotionIterSlider, addEmotionBtn,
-        styleSelect, styleIterSlider, addStyleBtn,
-        speedSelect, speedIterSlider, addSpeedBtn,
-        restorePassSlider, restoreRefInput, addRestoreBtn
-    } = inlineEditData;
+    const { inlineEditSection, inlineTagControls, updateInlineEnginePanelVisibility } = inlineEditData;
     inlineEditSection.classList.add("string-multiline-tag-editor-inline-section");
+
+    syncInlineEngineSelection = () => {
+        const desiredEngine = state.activeInlineTagEngine || node.properties?.ttsTagEditorInlineEngine || "step_audio_editx";
+        state.activeInlineTagEngine = desiredEngine;
+        node.properties.ttsTagEditorInlineEngine = desiredEngine;
+        if (inlineTagControls.inlineEngineSelect.value !== desiredEngine) {
+            inlineTagControls.inlineEngineSelect.value = desiredEngine;
+        }
+        updateInlineEnginePanelVisibility?.();
+    };
+
+    inlineTagControls.inlineEngineSelect.addEventListener("change", () => {
+        const selectedEngine = inlineTagControls.inlineEngineSelect.value || "step_audio_editx";
+        state.activeInlineTagEngine = selectedEngine;
+        node.properties.ttsTagEditorInlineEngine = selectedEngine;
+    });
 
     // Build tab system
     const tabData = buildTabSystem(state, storageKey);
@@ -1612,7 +1661,7 @@ function addStringMultilineTagEditorWidget(node) {
     charParamContent.appendChild(paramSection);
     charParamContent.appendChild(presetSection);
 
-    // Assemble Inline Edit tab
+    // Assemble Inline Tags tab
     inlineEditContent.appendChild(inlineEditSection);
 
     // Assemble header and shell
@@ -1665,20 +1714,219 @@ function addStringMultilineTagEditorWidget(node) {
         showNotification
     });
 
-    attachAllEventHandlers(
+    const editorEventApi = attachAllEventHandlers(
         editor, state, widget, storageKey, getPlainText, setEditorText, getCaretPos, setCaretPos, getSelectionRange,
         undoBtn, redoBtn, historyStatus, charSelect, charInput, addCharBtn, langSelect, addLangBtn,
         paramTypeSelect, paramInputWrapper, addParamBtn, presetButtons, presetTitles, updatePresetGlows,
         formatBtn, validateBtn, fontFamilySelect, fontSizeInput, null, setFontSize, setFontFamily,
         showNotification, resizeDivider, sidebar, setSidebarWidth, setUIScale, setSidebarResizeActive,
-        // Inline edit controls
-        paraSelect, paraIterSlider, addParaBtn,
-        emotionSelect, emotionIterSlider, addEmotionBtn,
-        styleSelect, styleIterSlider, addStyleBtn,
-        speedSelect, speedIterSlider, addSpeedBtn,
-        restorePassSlider, restoreRefInput, addRestoreBtn,
+        inlineTagControls,
         openFindReplace, focusNextFindMatch, focusPreviousFindMatch
     );
+
+    const openEmotionPopupForRange = (start, end, tag = null, options = {}) => {
+        const transaction = editorEventApi.beginExternalTransaction();
+        const textWithReplacement = (replacement) => (
+            transaction.originalText.slice(0, start) + replacement + transaction.originalText.slice(end)
+        );
+        openIndexTTSEmotionEditor({
+            tag,
+            ...options,
+            onApply: (replacement) => {
+                editorEventApi.commitExternalTransaction(
+                    transaction,
+                    textWithReplacement(replacement),
+                    start + replacement.length
+                );
+            },
+            onPreview: (replacement) => {
+                editorEventApi.previewExternalTransaction(
+                    transaction,
+                    textWithReplacement(replacement),
+                    start + replacement.length
+                );
+            },
+            onCommit: (replacement) => {
+                editorEventApi.commitExternalTransaction(
+                    transaction,
+                    textWithReplacement(replacement),
+                    start + replacement.length
+                );
+            },
+            onCancel: () => editorEventApi.cancelExternalTransaction(transaction),
+        });
+    };
+
+    const emotionTagAtCaret = () => {
+        const text = getPlainText();
+        const position = getCaretPos();
+        const start = text.lastIndexOf("[", position);
+        const end = text.indexOf("]", position);
+        if (start < 0 || end < start) return null;
+        if (text.slice(start, position).includes("]") || text.slice(position, end).includes("[")) return null;
+        const tag = text.slice(start, end + 1);
+        return { text, position, start, end: end + 1, tag };
+    };
+
+    const getSelectOptions = select => [...(select?.options || [])]
+        .filter(option => option.value)
+        .map(option => ({ value: option.value, label: option.textContent || option.value }));
+
+    const openTagSwap = async (match, anchorRect, holdPointerId = null) => {
+        const previousUserSelect = editor.style.userSelect;
+        let holdSelectionLocked = false;
+        const releaseHoldSelection = () => {
+            if (!holdSelectionLocked) return;
+            holdSelectionLocked = false;
+            editor.style.userSelect = previousUserSelect;
+        };
+        try {
+            if (holdPointerId !== null) {
+                const activationCaret = getCaretPos();
+                setCaretPos(activationCaret);
+                editor.style.userSelect = "none";
+                holdSelectionLocked = true;
+            }
+            const { openTagSwapPopup } = await import("./tag_swap_popup.js");
+            const transaction = editorEventApi.beginExternalTransaction();
+            const popup = openTagSwapPopup({
+                tag: match.tag,
+                cursorOffset: match.position - match.start,
+                anchorRect,
+                characterOptions: getSelectOptions(charSelect),
+                languageOptions: getSelectOptions(langSelect),
+                engine: inlineTagControls.inlineEngineSelect.value || "step_audio_editx",
+                holdPointerId,
+                onGestureEnd: releaseHoldSelection,
+                onSelect: replacement => {
+                    const finalText = transaction.originalText.slice(0, match.start) + replacement + transaction.originalText.slice(match.end);
+                    editorEventApi.commitExternalTransaction(transaction, finalText, match.start + replacement.length);
+                },
+            });
+            if (!popup) releaseHoldSelection();
+        } catch (error) {
+            releaseHoldSelection();
+            console.error("TTS tag quick-swap failed to load:", error);
+        }
+    };
+
+    const angleTagAtCaret = () => {
+        const text = getPlainText();
+        const position = getCaretPos();
+        const start = text.lastIndexOf("<", position);
+        const end = text.indexOf(">", position);
+        if (start < 0 || end < start) return null;
+        if (text.slice(start, position).includes(">") || text.slice(position, end).includes("<")) return null;
+        return { text, position, start, end: end + 1, tag: text.slice(start, end + 1) };
+    };
+
+    const isQuotedEmotionTextTag = tag => /^\[emotion:["'][\s\S]*["']\]$/i.test(tag);
+
+    inlineTagControls.indexTTS.managePresetsBtn.addEventListener("click", () => {
+        const position = getCaretPos();
+        openEmotionPopupForRange(position, position, null, { showPresets: true });
+    });
+
+    let suppressTagSwapClick = false;
+    const tagSwapClickIsSuppressed = () => {
+        if (!suppressTagSwapClick) return false;
+        setTimeout(() => { suppressTagSwapClick = false; }, 0);
+        return true;
+    };
+
+    editor.addEventListener("click", (event) => {
+        if (tagSwapClickIsSuppressed()) return;
+        const match = emotionTagAtCaret();
+        if (!match) return;
+
+        const target = event.target instanceof Element ? event.target : null;
+        const targetText = target?.textContent?.trim();
+        const anchorRect = target && target !== editor && targetText === match.tag
+            ? target.getBoundingClientRect()
+            : { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY };
+
+        if (parseVectorTag(match.tag)) {
+            openEmotionPopupForRange(match.start, match.end, match.tag, {
+                anchorRect,
+                showPresets: false
+            });
+            return;
+        }
+
+        if (isQuotedEmotionTextTag(match.tag)) return;
+
+        const presetMatch = match.tag.match(/^\[emotion:([A-Za-z0-9_-]+)\]$/i);
+        if (presetMatch) {
+            openIndexTTSEmotionPresetPicker({
+                presetName: presetMatch[1],
+                anchorRect,
+                onSelect: presetName => {
+                    const transaction = editorEventApi.beginExternalTransaction();
+                    const replacement = `[emotion:${presetName}]`;
+                    const finalText = transaction.originalText.slice(0, match.start) + replacement + transaction.originalText.slice(match.end);
+                    editorEventApi.commitExternalTransaction(transaction, finalText, match.start + replacement.length);
+                }
+            });
+            return;
+        }
+
+        openTagSwap(match, anchorRect);
+    });
+
+    editor.addEventListener("click", event => {
+        if (tagSwapClickIsSuppressed()) return;
+        const match = angleTagAtCaret();
+        if (!match) return;
+        openTagSwap(match, { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY });
+    });
+
+    let tagSwapHoldTimer = null;
+    let tagSwapHoldCleanup = null;
+    editor.addEventListener("pointerdown", event => {
+        if (event.button !== 0) return;
+        const pointerId = event.pointerId;
+        const originX = event.clientX;
+        const originY = event.clientY;
+        const anchorRect = { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY };
+        const cleanup = () => {
+            if (tagSwapHoldTimer !== null) clearTimeout(tagSwapHoldTimer);
+            tagSwapHoldTimer = null;
+            window.removeEventListener("pointermove", cancelForTextSelection, true);
+            window.removeEventListener("pointerup", cleanup, true);
+            window.removeEventListener("pointercancel", cleanup, true);
+            if (tagSwapHoldCleanup === cleanup) tagSwapHoldCleanup = null;
+        };
+        const cancelForTextSelection = moveEvent => {
+            if (moveEvent.pointerId !== pointerId) return;
+            if (Math.hypot(moveEvent.clientX - originX, moveEvent.clientY - originY) > 6) cleanup();
+        };
+        tagSwapHoldCleanup?.();
+        tagSwapHoldCleanup = cleanup;
+        window.addEventListener("pointermove", cancelForTextSelection, true);
+        window.addEventListener("pointerup", cleanup, true);
+        window.addEventListener("pointercancel", cleanup, true);
+        tagSwapHoldTimer = setTimeout(() => {
+            tagSwapHoldTimer = null;
+            const bracket = emotionTagAtCaret();
+            const angle = angleTagAtCaret();
+            const match = bracket || angle;
+            if (!match || (bracket && (parseVectorTag(match.tag) || isEmotionTextTag(match.tag)))) {
+                cleanup();
+                return;
+            }
+            window.removeEventListener("pointermove", cancelForTextSelection, true);
+            setCaretPos(getCaretPos());
+            suppressTagSwapClick = true;
+            openTagSwap(match, anchorRect, pointerId);
+        }, 180);
+    });
+
+    editor.addEventListener("dblclick", () => {
+        const match = emotionTagAtCaret();
+        if (match && isEmotionTextTag(match.tag) && !isQuotedEmotionTextTag(match.tag)) {
+            openEmotionPopupForRange(match.start, match.end, match.tag, { showPresets: true });
+        }
+    });
 
     const stopFindBarShortcutLeak = (event) => {
         event.stopPropagation();
@@ -1999,7 +2247,7 @@ function addStringMultilineTagEditorWidget(node) {
                 rows: [
                     { syntax: "[Alice]", purpose: "Switch active speaker", notes: "Uses the named character for following text until another speaker tag appears." },
                     { syntax: "[en:Alice]", purpose: "Set language and speaker together", notes: "Useful when one segment needs a different language voice or pronunciation context." },
-                    { syntax: "[pause:1s]", purpose: "Insert silence", notes: "Duration can use values like 500ms, 1s, 2.5s." }
+                    { syntax: "[pause:1s] [Alice|temperature:0.7]", purpose: "Insert silence", notes: "Keep pause as a separate tag before the character or parameter tag. Format fixes nested pause parts." }
                 ],
                 bullets: [
                     "Character names are case-insensitive and unknown characters fall back safely.",
@@ -2026,32 +2274,25 @@ function addStringMultilineTagEditorWidget(node) {
             {
                 key: "inline-tags",
                 tabLabel: "Inline Tags",
-                title: "Inline Edit Tags Guide",
-                intro: "These tags are for convenience when you want segment-level Step Audio EditX processing without building separate TTS -> Edit chains.",
+                title: "Inline Tags Guide",
+                intro: "This panel is engine-aware. Step Audio EditX uses post-process tags, while Higgs Audio v3, CosyVoice3, and OmniVoice use native generation tags.",
                 rows: [
-                    { syntax: "<Laughter> / <Laughter:2>", purpose: "Insert laughter", notes: "Paralinguistic insertion. Position matters because the sound is inserted where the tag appears." },
-                    { syntax: "<Breathing>", purpose: "Insert breathing", notes: "Useful for pauses, fatigue, or realism between spoken phrases." },
-                    { syntax: "<Sigh>", purpose: "Insert sigh", notes: "Good for resignation, frustration, or relief beats." },
-                    { syntax: "<Uhm>", purpose: "Insert hesitation", notes: "Adds an 'uhm' hesitation sound at the tag position." },
-                    { syntax: "<Surprise-oh> / <Surprise-ah> / <Surprise-wa>", purpose: "Insert surprise reactions", notes: "Three surprise variants for different expressive tones." },
-                    { syntax: "<Confirmation-en>", purpose: "Insert confirmation sound", notes: "Short confirming reaction inserted inline." },
-                    { syntax: "<Question-ei>", purpose: "Insert questioning sound", notes: "Useful before or around uncertain dialogue." },
-                    { syntax: "<Dissatisfaction-hnn>", purpose: "Insert dissatisfied reaction", notes: "Adds a disapproving or displeased 'hnn' sound." },
-                    { syntax: "<emotion:VALUE> / <emotion:VALUE:ITERATIONS>", purpose: "Apply whole-segment emotion", notes: "Available values: happy, sad, angry, excited, calm, fearful, surprised, disgusted, confusion, empathy, embarrass, depressed, coldness, admiration." },
-                    { syntax: "<style:VALUE> / <style:VALUE:ITERATIONS>", purpose: "Apply whole-segment style", notes: "Available values include whisper, serious, child, older, pure, sister, sweet, exaggerated, ethereal, warm, comfort, authority, chat, radio, soulful, gentle, story, vivid, program, news, advertising, roar, murmur, shout, deeply, loudly, arrogant, friendly." },
-                    { syntax: "<speed:faster> / <speed:slower> / <speed:more_faster> / <speed:more_slower>", purpose: "Adjust whole-segment speed", notes: "Speed tags affect the full segment, not a point insertion." },
-                    { syntax: "<restore>", purpose: "Basic voice restoration", notes: "Runs 1 voice-conversion restore pass using the original pre-edit audio as the reference." },
-                    { syntax: "<restore:2>", purpose: "Stronger restoration", notes: "Runs 2 restore passes using the original clean pre-edit audio as the reference." },
-                    { syntax: "<restore:1@2>", purpose: "Restore from an intermediate edit-step reference", notes: "`N@M` means: run N restore passes using edit-step M as the reference audio, not restore pass M. Example timeline: `<style:whisper:2> <Laughter:3> <restore:1@2>` means whisper creates edit steps 1-2, laughter creates edit steps 3-5, then restore runs last using edit step 2 as reference so it keeps the whisper character but removes later degradation." },
-                    { syntax: "<A|B|C> or <A><B><C>", purpose: "Combine multiple inline tags", notes: "Both pipe-separated and separate-tag forms work. Processing order is emotion/style/speed first, paralinguistics second, restore last." }
+                    { syntax: "Step: <Laughter> / <Laughter:2>", purpose: "Post-process paralinguistic insertion", notes: "Step Audio EditX runs after TTS. Position matters because the sound is inserted where the tag appears." },
+                    { syntax: "Step: <emotion:happy> / <style:whisper> / <speed:faster>", purpose: "Whole-segment post-process controls", notes: "Use the Step mode in the inline panel when you want convenience editing without chaining a separate Audio Editor node." },
+                    { syntax: "Step: <restore> / <restore:2> / <restore:1@2>", purpose: "Voice restoration after Step edits", notes: "Restore always runs last and can aim back at the original voice or at an earlier edit step." },
+                    { syntax: "Higgs: <|emotion:amusement|>", purpose: "Native Higgs emotion control", notes: "Editor inserts canonical Higgs syntax. TTS Audio Suite also accepts alias input like <emotion:amusement>, but canonical output stays <|...|>." },
+                    { syntax: "Higgs: <|style:whispering|> / <|prosody:pause|> / <|sfx:laughter|>", purpose: "Native Higgs style, timing, and SFX tags", notes: "These affect generation directly. Higgs does not use Step post-process tags in this panel." },
+                    { syntax: "Cosy: <breath> / <laughter> / <cough>", purpose: "Native CosyVoice3 single tags", notes: "These are native generation tags, not Step Audio EditX tags." },
+                    { syntax: "Cosy: <laughing>text</laughing> / <strong>text</strong>", purpose: "Native CosyVoice3 wrapper tags", notes: "If text is selected, the editor can wrap the selection with the chosen Cosy wrapper tag." },
+                    { syntax: "Omni: <laughter> / <sigh> / <question-ei>", purpose: "Suite-default OmniVoice aliases", notes: "The editor inserts angle-tag aliases. The OmniVoice processor converts them internally to official native tags during generation." }
                 ],
                 bullets: [
-                    "Use inline tags for convenience and selective segment editing. Use the separate Audio Editor node for maximum manual control.",
-                    "Processing order is emotion/style/speed first, then paralinguistic insertion, then restore last.",
-                    "Position matters for paralinguistic tags like `<Laughter>` and `<Breathing>`, but not for whole-segment tags like emotion, style, speed, and restore.",
-                    "`<restore>` and `<restore:N>` use the original clean pre-edit audio as reference. `<restore:N@M>` switches the reference to edit step M, not restore pass M.",
-                    "Example: `<style:whisper:2> <Laughter:3> <restore:1@2>` means restore runs after everything else, but it aims back at the audio from whisper step 2 so you keep the whisper feel and drop the later laughter damage.",
-                    "If you want stronger laughter or reaction effects, include supporting spoken text too, not just the tag."
+                    "Pick the tag engine inside the Inline Tags panel instead of mixing syntaxes blindly.",
+                    "Step Audio EditX tags are post-process controls. Higgs Audio v3, CosyVoice3, and OmniVoice tags are native generation controls.",
+                    "Higgs editor insertion always uses canonical `<|...|>` syntax even though alias forms like `<emotion:amusement>` are accepted on input.",
+                    "CosyVoice3 does not run Step Audio EditX post-processing here. Use native Cosy tags instead.",
+                    "OmniVoice uses suite-default angle-tag aliases in the editor, then converts them internally to official native tags at generation time.",
+                    "Use the separate Audio Editor node when you want full manual Step Audio EditX workflows across generated audio."
                 ]
             },
             {

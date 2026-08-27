@@ -26,6 +26,29 @@ from .lib.utils import gc_collect
 bh, ah = signal.butter(N=5, Wn=48, btype="high", fs=16000)
 
 class VC(FeatureExtractor):
+    def _segment_trim_tgt(self) -> int:
+        """
+        TTS Audio Suite patch: preserve one target-frame of context on each side.
+
+        The bundled RVC pipeline crops every converted segment by `t_pad_tgt` on both
+        ends, but the inference path already quantizes length on the 160-sample HuBERT
+        frame grid. In practice this makes each top-level conversion call come back a
+        little short, and long chunked runs accumulate audible timeline drift.
+
+        We keep one converted frame from the padded context on each side instead of
+        trimming the full pad. This matches the pipeline's own frame grid rather than
+        post-stretching audio after conversion.
+        """
+        if self.t_pad <= 0:
+            return self.t_pad_tgt
+        target_frame = int(round(self.window * (self.t_pad_tgt / float(self.t_pad))))
+        return max(0, self.t_pad_tgt - target_frame)
+
+    def _extract_segment_core(self, segment_audio: np.ndarray) -> np.ndarray:
+        trim_tgt = self._segment_trim_tgt()
+        if trim_tgt <= 0 or segment_audio.shape[0] <= trim_tgt * 2:
+            return segment_audio
+        return segment_audio[trim_tgt:-trim_tgt]
 
     def vc(
         self,
@@ -59,6 +82,16 @@ class VC(FeatureExtractor):
             "output_layer": 9 if version == "v1" else 12,
         }
         feats = model.extract_features(version=version,**inputs)
+
+        expected_dim = getattr(getattr(net_g, "enc_p", None), "emb_phone", None)
+        expected_dim = getattr(expected_dim, "in_features", None)
+        actual_dim = int(feats.shape[-1])
+        if expected_dim is not None and actual_dim != int(expected_dim):
+            raise ValueError(
+                "HuBERT/RVC model mismatch: the selected HuBERT model produces "
+                f"{actual_dim} dimensions, but this RVC model expects {int(expected_dim)}. "
+                "Select the HuBERT model used to train this RVC checkpoint."
+            )
 
         if protect < 0.5 and pitch is not None and pitchf is not None:
             feats0 = feats.clone()
@@ -192,7 +225,8 @@ class VC(FeatureExtractor):
                 f0_max=f0_max,
             )
             p_len = min(pitch.shape[0], pitchf.shape[0])
-            pitch = pitch[:p_len].astype(np.int64 if self.device != 'mps' else np.float32)
+            # Pitch values are categorical embedding indices, including on MPS.
+            pitch = pitch[:p_len].astype(np.int64)
             pitchf = pitchf[:p_len].astype(np.float32)
             pitch = torch.from_numpy(pitch).to(self.device).unsqueeze(0)
             pitchf = torch.from_numpy(pitchf).to(self.device).unsqueeze(0)
@@ -207,13 +241,47 @@ class VC(FeatureExtractor):
             audio_slice = audio_pad[start:end]
             pitch_slice = pitch[:, start // self.window:end // self.window] if if_f0 else None
             pitchf_slice = pitchf[:, start // self.window:end // self.window] if if_f0 else None
-            audio_opt.append(self.vc(model, net_g, sid, audio_slice, pitch_slice, pitchf_slice, times, index, big_npy, index_rate, version, protect)[self.t_pad_tgt : -self.t_pad_tgt])
+            audio_opt.append(
+                self._extract_segment_core(
+                    self.vc(
+                        model,
+                        net_g,
+                        sid,
+                        audio_slice,
+                        pitch_slice,
+                        pitchf_slice,
+                        times,
+                        index,
+                        big_npy,
+                        index_rate,
+                        version,
+                        protect,
+                    )
+                )
+            )
             s = t
 
         audio_slice = audio_pad[t:]
         pitch_slice = pitch[:, t // self.window:] if if_f0 and t is not None else pitch
         pitchf_slice = pitchf[:, t // self.window:] if if_f0 and t is not None else pitchf
-        audio_opt.append(self.vc(model, net_g, sid, audio_slice, pitch_slice, pitchf_slice, times, index, big_npy, index_rate, version, protect)[self.t_pad_tgt : -self.t_pad_tgt])
+        audio_opt.append(
+            self._extract_segment_core(
+                self.vc(
+                    model,
+                    net_g,
+                    sid,
+                    audio_slice,
+                    pitch_slice,
+                    pitchf_slice,
+                    times,
+                    index,
+                    big_npy,
+                    index_rate,
+                    version,
+                    protect,
+                )
+            )
+        )
         
         audio_opt = np.concatenate(audio_opt)
         if rms_mix_rate < 1:
@@ -246,12 +314,26 @@ def get_vc(model_path,file_index=None,config=config,device=None):
             from .lib.infer_pack.models import SynthesizerTrnMs256NSFsid_nono
             net_g = SynthesizerTrnMs256NSFsid_nono(*cpt["config"])
     elif version == "v2":
+        input_dim = None
+        input_weight = cpt.get("weight", {}).get("enc_p.emb_phone.weight")
+        if input_weight is not None and getattr(input_weight, "ndim", 0) == 2:
+            input_dim = int(input_weight.shape[1])
         if if_f0 == 1:
-            from .lib.infer_pack.models import SynthesizerTrnMs768NSFsid
-            net_g = SynthesizerTrnMs768NSFsid(*cpt["config"], is_half=config.is_half)
+            if input_dim == 1024:
+                from .lib.infer_pack.models import SynthesizerTrnMs1024NSFsid
+                model_class = SynthesizerTrnMs1024NSFsid
+            else:
+                from .lib.infer_pack.models import SynthesizerTrnMs768NSFsid
+                model_class = SynthesizerTrnMs768NSFsid
+            net_g = model_class(*cpt["config"], is_half=config.is_half)
         else:
-            from .lib.infer_pack.models import SynthesizerTrnMs768NSFsid_nono
-            net_g = SynthesizerTrnMs768NSFsid_nono(*cpt["config"])
+            if input_dim == 1024:
+                from .lib.infer_pack.models import SynthesizerTrnMs1024NSFsid_nono
+                model_class = SynthesizerTrnMs1024NSFsid_nono
+            else:
+                from .lib.infer_pack.models import SynthesizerTrnMs768NSFsid_nono
+                model_class = SynthesizerTrnMs768NSFsid_nono
+            net_g = model_class(*cpt["config"])
     del net_g.enc_q
     
     net_g.load_state_dict(cpt["weight"], strict=False)

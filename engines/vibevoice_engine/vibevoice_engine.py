@@ -178,7 +178,8 @@ class VibeVoiceEngine:
                          model_name: str = "vibevoice-1.5B",
                          device: str = "auto",
                          attention_mode: str = "auto",
-                         quantize_llm_4bit: bool = False) -> None:
+                         quantize_llm_4bit: bool = False,
+                         model_path: Optional[str] = None) -> None:
         """
         Initialize VibeVoice engine with specified model.
         
@@ -205,7 +206,7 @@ class VibeVoiceEngine:
             raise RuntimeError(f"VibeVoice package not installed. Please install with: pip install git+https://github.com/microsoft/VibeVoice.git\nError: {e}")
         
         # Get model path (downloads if necessary)
-        model_path = self.downloader.get_model_path(model_name)
+        model_path = model_path or self.downloader.get_model_path(model_name)
         if not model_path:
             raise RuntimeError(f"Failed to get VibeVoice model '{model_name}'")
         
@@ -719,6 +720,8 @@ class VibeVoiceEngine:
                     # Extract waveform from ComfyUI audio format
                     waveform = voice_ref["waveform"]
                     input_sample_rate = voice_ref.get("sample_rate", 24000)
+                    shape = tuple(waveform.shape) if hasattr(waveform, "shape") else "unknown"
+                    print(f"🎵 VibeVoice ENGINE: Using waveform input for speaker {i+1} - shape: {shape}, sr: {input_sample_rate}")
                     
                     # Convert to numpy
                     if isinstance(waveform, torch.Tensor):

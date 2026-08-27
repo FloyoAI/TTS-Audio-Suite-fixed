@@ -25,6 +25,10 @@ from engines.adapters.qwen3_tts_adapter import Qwen3TTSEngineAdapter
 from utils.models.language_mapper import resolve_language_alias
 from utils.text.step_audio_editx_special_tags import get_edit_tags_for_segment
 from utils.audio.edit_post_processor import process_segments as apply_edit_post_processing
+from utils.voice.character_logging import (
+    format_resolved_character_block,
+    resolved_character_label,
+)
 
 
 class Qwen3TTSProcessor:
@@ -66,91 +70,55 @@ class Qwen3TTSProcessor:
         # Session-based character-to-speaker mapping for CustomVoice
         self._character_speaker_mapping = {}
 
-        # Extract config parameters
-        model_size = engine_config.get('model_size', '1.7B')
-        device = engine_config.get('device', 'auto')
-        dtype = engine_config.get('dtype', 'auto')
-        attn_implementation = engine_config.get('attn_implementation', 'auto')
-        voice_preset = engine_config.get('voice_preset', 'None (Zero-shot / Custom)')
+        self._load_configured_model()
 
-        # Create context for model type determination
-        context = {
-            "voice_preset": voice_preset,
-            "model_size": model_size
-        }
+    @staticmethod
+    def _model_load_signature(config: Dict[str, Any]) -> tuple:
+        return tuple(config.get(key) for key in (
+            'model_variant', 'model_path', 'model_name', 'model_type', 'model_size',
+            'device', 'dtype', 'attn_implementation', 'runtime_mode', 'runtime_profile',
+            'use_torch_compile', 'use_cuda_graphs', 'compile_mode',
+        ))
 
-        # Determine model type based on voice_preset
-        if voice_preset == "None (Zero-shot / Custom)":
-            model_type = "Base"
-        else:
-            model_type = "CustomVoice"
+    def _load_configured_model(self):
+        model_size = self.config.get('model_size', '1.7B')
+        voice_preset = self.config.get('voice_preset', 'None (Zero-shot / Custom)')
+        model_type = self.config.get('model_type') or (
+            'Base' if voice_preset == 'None (Zero-shot / Custom)' else 'CustomVoice'
+        )
+        model_name = self.config.get('model_name') or f'Qwen3-TTS-12Hz-{model_size}-{model_type}'
+        model_path = self.config.get('model_path') or self.config.get('model_variant') or model_name
 
-        # Build model path based on determined type
-        model_path = f'Qwen3-TTS-12Hz-{model_size}-{model_type}'
-
-        # Load model via adapter (with intelligent model selection)
         self.adapter.load_base_model(
             model_path=model_path,
-            device=device,
-            dtype=dtype,
+            device=self.config.get('device', 'auto'),
+            dtype=self.config.get('dtype', 'auto'),
             model_size=model_size,
-            attn_implementation=attn_implementation,
-            context=context,
-            use_torch_compile=engine_config.get('use_torch_compile', False),
-            use_cuda_graphs=engine_config.get('use_cuda_graphs', False),
-            compile_mode=engine_config.get('compile_mode', 'reduce-overhead')
+            attn_implementation=self.config.get('attn_implementation', 'auto'),
+            runtime_mode=self.config.get('runtime_mode', 'main_environment'),
+            runtime_profile=self.config.get('runtime_profile'),
+            context={
+                'voice_preset': voice_preset,
+                'model_type': model_type,
+                'model_name': model_name,
+            },
+            use_torch_compile=self.config.get('use_torch_compile', False),
+            use_cuda_graphs=self.config.get('use_cuda_graphs', False),
+            compile_mode=self.config.get('compile_mode', 'reduce-overhead'),
         )
 
     def update_config(self, new_config: Dict[str, Any]):
         """
         Update processor configuration with new parameters.
 
-        CRITICAL: When voice_preset changes, we need to reload the model because
-        VoiceDesign, CustomVoice, and Base are different model files.
+        Reload only when the selected checkpoint or another load-time setting changes.
         """
-        # Check if voice_preset changed (determines model type: Base vs CustomVoice vs VoiceDesign)
-        old_voice_preset = self.config.get('voice_preset', 'None (Zero-shot / Custom)')
-        new_voice_preset = new_config.get('voice_preset', old_voice_preset)
-
-        # Update config first
+        old_signature = self._model_load_signature(self.config)
         self.config.update(new_config)
-
-        # Determine if model type changed
-        old_model_type = "Base" if old_voice_preset == "None (Zero-shot / Custom)" else "CustomVoice"
-        new_model_type = "Base" if new_voice_preset == "None (Zero-shot / Custom)" else "CustomVoice"
-
-        # If model type changed, trigger reload via adapter
-        # The unified_model_interface will automatically unload the old variant
-        if old_model_type != new_model_type:
-            print(f"🔄 Voice preset changed: {old_voice_preset} → {new_voice_preset}")
-            print(f"   Reloading model type: {old_model_type} → {new_model_type}")
-
-            model_size = self.config.get('model_size', '1.7B')
-            device = self.config.get('device', 'auto')
-            dtype = self.config.get('dtype', 'auto')
-            attn_implementation = self.config.get('attn_implementation', 'auto')
-
-            # Build model path for new type
-            model_path = f'Qwen3-TTS-12Hz-{model_size}-{new_model_type}'
-
-            # Create context for model type determination
-            context = {
-                "voice_preset": new_voice_preset,
-                "model_size": model_size
-            }
-
-            # Reload via adapter - unified interface will handle cleanup automatically
-            self.adapter.load_base_model(
-                model_path=model_path,
-                device=device,
-                dtype=dtype,
-                model_size=model_size,
-                attn_implementation=attn_implementation,
-                context=context,
-                use_torch_compile=self.config.get('use_torch_compile', False),
-                use_cuda_graphs=self.config.get('use_cuda_graphs', False),
-                compile_mode=self.config.get('compile_mode', 'reduce-overhead')
-            )
+        new_signature = self._model_load_signature(self.config)
+        if old_signature != new_signature:
+            print(f"🔄 Qwen3-TTS model configuration changed: reloading {self.config.get('model_variant')}")
+            self._load_configured_model()
 
     def _language_name_to_code(self, language_input: str) -> str:
         """Convert language name or code to Qwen3-TTS language parameter."""
@@ -383,17 +351,11 @@ class Qwen3TTSProcessor:
 
         print(f"🔄 Qwen3-TTS: Processing {len(segment_objects)} character segments")
 
-        # Calculate total chunks across all segments for time estimation
-        chunk_texts = []
-        for seg in segment_objects:
-            seg_text = seg.text.strip()
-            if enable_chunking and len(seg_text) > max_chars:
-                # Estimate chunk count and sizes
-                chunks = self.chunker.split_into_chunks(seg_text, max_chars)
-                for chunk in chunks:
-                    chunk_texts.append(len(chunk))
-            else:
-                chunk_texts.append(len(seg_text))
+        # Match the exact pause splitting and chunking performed below so the
+        # progress tracker has one entry for every generated audio block.
+        chunk_texts = self._plan_generation_block_lengths(
+            segment_objects, enable_chunking, max_chars
+        )
 
         # Only start job if not already tracking (SRT processor manages job at higher level)
         self._srt_mode = self.adapter.job_tracker is not None
@@ -442,6 +404,34 @@ class Qwen3TTSProcessor:
             )
 
         return audio_segments
+
+    def _plan_generation_block_lengths(
+        self, segment_objects, enable_chunking: bool, max_chars: int
+    ) -> List[int]:
+        block_lengths = []
+
+        for segment in segment_objects:
+            segment_text = segment.text.strip()
+            if PauseTagProcessor.has_pause_tags(segment_text):
+                pause_segments, _ = PauseTagProcessor.parse_pause_tags(segment_text)
+                text_parts = [
+                    content for segment_type, content in pause_segments
+                    if segment_type == "text"
+                ]
+            else:
+                text_parts = [segment_text]
+
+            for text_part in text_parts:
+                clean_text, _ = get_edit_tags_for_segment(text_part)
+                if enable_chunking and len(text_part) > max_chars:
+                    block_lengths.extend(
+                        len(chunk)
+                        for chunk in self.chunker.split_into_chunks(clean_text, max_chars)
+                    )
+                else:
+                    block_lengths.append(len(clean_text))
+
+        return block_lengths
 
     def _process_character_block(self, character: str, combined_text: str,
                                voice_mapping: Dict[str, Any], params: Dict,
@@ -519,7 +509,8 @@ class Qwen3TTSProcessor:
             combined_text_clean, combined_text_edit_tags = get_edit_tags_for_segment(combined_text)
 
             chunks = self.chunker.split_into_chunks(combined_text_clean, max_chars)
-            print(f"📝 Chunking {character}'s combined text into {len(chunks)} chunks (Language: {segment_lang}){voice_note}")
+            display_name = resolved_character_label(character, voice_ref)
+            print(f"📝 Chunking {display_name}'s combined text into {len(chunks)} chunks (Language: {segment_lang}){voice_note}")
 
             for chunk_idx, chunk in enumerate(chunks):
                 # Check for interruption during chunk processing
@@ -569,10 +560,9 @@ class Qwen3TTSProcessor:
             # Extract inline edit tags BEFORE generation
             combined_text_clean, combined_text_edit_tags = get_edit_tags_for_segment(combined_text)
 
-            print(f"🎭 Qwen3-TTS - Generating for '{character}' (Language: {segment_lang}){voice_note}:")
-            print("="*60)
-            print(combined_text_clean)
-            print("="*60)
+            display_name = resolved_character_label(character, voice_ref)
+            print(f"🎭 Qwen3-TTS - Generating for '{display_name}' (Language: {segment_lang}){voice_note}:")
+            print(format_resolved_character_block(character, combined_text_clean, voice_ref))
 
             # Set current segment for time tracking (skip in SRT mode - managed at subtitle level)
             if not self._srt_mode:

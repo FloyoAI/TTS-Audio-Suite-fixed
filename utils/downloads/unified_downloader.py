@@ -8,6 +8,7 @@ import requests
 import subprocess
 from typing import Optional, Dict, Any, List
 from pathlib import Path
+import fnmatch
 import folder_paths
 
 # Import extra paths support
@@ -280,6 +281,89 @@ class UnifiedDownloader:
             success = False
         
         return model_dir if success else None
+
+    def download_huggingface_snapshot(
+        self,
+        repo_id: str,
+        target_dir: str,
+        revision: Optional[str] = None,
+        allow_patterns: Optional[List[str]] = None,
+        required_files: Optional[List[str]] = None,
+        force_download: bool = False,
+        description: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Download an entire HuggingFace repo snapshot directly into target_dir without
+        treating HuggingFace cache as the final storage location.
+
+        This is intended for folder-shaped artifacts such as PEFT/LoRA adapters.
+        """
+        try:
+            from huggingface_hub import HfApi
+        except Exception as e:
+            raise RuntimeError(
+                "huggingface_hub is required for snapshot-style downloads."
+            ) from e
+
+        os.makedirs(target_dir, exist_ok=True)
+        label = description or repo_id
+        print(f"📥 Downloading snapshot for {label} directly into {target_dir}")
+
+        api = HfApi()
+        try:
+            repo_files = api.list_repo_files(repo_id=repo_id, revision=revision)
+        except Exception as e:
+            raise RuntimeError(f"Failed to list files for Hugging Face repo {repo_id}: {e}") from e
+
+        if allow_patterns:
+            matched_files = []
+            for file_path in repo_files:
+                if any(fnmatch.fnmatch(file_path, pattern) for pattern in allow_patterns):
+                    matched_files.append(file_path)
+            repo_files = matched_files
+
+        if not repo_files:
+            raise RuntimeError(f"No files matched for Hugging Face repo {repo_id}")
+
+        if force_download:
+            for rel_path in repo_files:
+                target_path = os.path.join(target_dir, rel_path)
+                if os.path.exists(target_path):
+                    try:
+                        os.remove(target_path)
+                    except OSError:
+                        pass
+
+        failed_files = []
+        url_revision = revision or "main"
+        for rel_path in repo_files:
+            target_path = os.path.join(target_dir, rel_path)
+            url = f"https://huggingface.co/{repo_id}/resolve/{url_revision}/{rel_path}"
+            ok = self.download_file(
+                url,
+                target_path,
+                f"{label}/{rel_path}",
+                force_download=force_download,
+            )
+            if not ok:
+                failed_files.append(rel_path)
+
+        if failed_files:
+            raise RuntimeError(
+                f"Failed to download {len(failed_files)} file(s) from {repo_id}: {failed_files[:10]}"
+            )
+
+        missing_required = []
+        for rel_path in required_files or []:
+            if not os.path.exists(os.path.join(target_dir, rel_path)):
+                missing_required.append(rel_path)
+        if missing_required:
+            raise RuntimeError(
+                f"Downloaded snapshot for {repo_id} is incomplete. Missing required files: {missing_required}"
+            )
+
+        print(f"✅ Snapshot ready: {target_dir}")
+        return target_dir
     
     def download_chatterbox_model(self, repo_id: str, model_name: str, subdirectory: str = None, 
                                 files: List[str] = None) -> Optional[str]:
@@ -320,31 +404,57 @@ class UnifiedDownloader:
         success = True
         # Different critical files for Official 23-Lang model and its variants
         if is_official_23lang:
-            # Check if downloading v2 model - supports both official and Vietnamese variants
-            # Official: t3_mtl23ls_v2.safetensors, Vietnamese: t3_ml24ls_v2.safetensors
-            is_v2 = any(f.startswith("t3_") and f.endswith("_v2.safetensors") for f in files)
+            # V2 and V3 use the expanded multilingual tokenizer. Keep the
+            # requested T3 generation explicit so checkpoints cannot mix.
+            modern_t3 = next(
+                (
+                    f for f in files
+                    if f.startswith("t3_")
+                    and (f.endswith("_v2.safetensors") or f.endswith("_v3.safetensors"))
+                ),
+                None,
+            )
 
-            if is_v2:
-                # For v2, the critical file is whichever t3_*_v2.safetensors exists + tokenizer
-                t3_file = next((f for f in files if f.startswith("t3_") and f.endswith("_v2.safetensors")), None)
-                # Check for either the standard mtl_tokenizer or the expanded V2 one
+            if modern_t3:
+                t3_file = modern_t3
+                # Check for either the standard tokenizer or expanded tokenizer.
                 tokenizer_file = next((f for f in files if "tokenizer" in f and f.endswith(".json")), None)
                 if not tokenizer_file:
                     tokenizer_file = "grapheme_mtl_merged_expanded_v1.json"
                 
-                # SPECIAL CASE: Community v2 models (like Egyptian) often need the official v2 enhanced tokenizer 
-                # but don't include it in their repos. We'll grab it from the official repo as a dependency.
-                if repo_id != "ResembleAI/chatterbox" and not any("grapheme_mtl_merged_expanded" in f for f in files):
-                    official_v2_tokenizer = "grapheme_mtl_merged_expanded_v1.json"
-                    target_tokenizer_path = os.path.join(model_dir, official_v2_tokenizer)
-                    if not os.path.exists(target_tokenizer_path):
-                        print(f"📥 Architecture v2 detected. Downloading official v2 tokenizer as dependency...")
-                        if not self.download_from_hf_cli("ResembleAI/chatterbox", official_v2_tokenizer, model_dir):
-                            # Try HTTP fallback
-                            url = f"https://huggingface.co/ResembleAI/chatterbox/resolve/main/{official_v2_tokenizer}"
-                            self.download_file(url, target_tokenizer_path, f"Official V2 Tokenizer Dependency")
+                # Community V2 models often need official tokenizer assets
+                # which are not present in their own repositories.
+                if repo_id != "ResembleAI/chatterbox":
+                    official_dependencies = []
+                    if not any("grapheme_mtl_merged_expanded" in f for f in files):
+                        official_dependencies.append(
+                            "grapheme_mtl_merged_expanded_v1.json"
+                        )
+                    if "Cangjie5_TC.json" not in files:
+                        official_dependencies.append("Cangjie5_TC.json")
+
+                    for dependency in official_dependencies:
+                        target_dependency_path = os.path.join(model_dir, dependency)
+                        if os.path.exists(target_dependency_path):
+                            continue
+                        print(
+                            "📥 Expanded multilingual architecture detected. "
+                            f"Downloading official {dependency} dependency..."
+                        )
+                        if not self.download_from_hf_cli(
+                            "ResembleAI/chatterbox", dependency, model_dir
+                        ):
+                            url = (
+                                "https://huggingface.co/ResembleAI/chatterbox/"
+                                f"resolve/main/{dependency}"
+                            )
+                            self.download_file(
+                                url,
+                                target_dependency_path,
+                                f"Official multilingual {dependency} dependency",
+                            )
                 
-                critical_files = [t3_file, tokenizer_file] if (t3_file and tokenizer_file) else ["t3_mtl23ls_v2.safetensors", "mtl_tokenizer.json"]
+                critical_files = [t3_file, tokenizer_file]
             else:
                 critical_files = ["t3_23lang.safetensors", "mtl_tokenizer.json"]  # v1 requirements
         else:

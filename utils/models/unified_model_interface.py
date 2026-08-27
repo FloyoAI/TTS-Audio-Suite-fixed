@@ -11,7 +11,17 @@ from typing import Any, Dict, Optional, Callable, Union
 from pathlib import Path
 
 from utils.models.comfyui_model_wrapper import tts_model_manager, ModelInfo
-from utils.models.factory_config import ModelLoadConfig
+from utils.models.factory_config import ModelLoadConfig, runtime_uses_isolation
+from utils.models.engine_registry import get_default_runtime_profile
+from utils.runtimes import (
+    build_fish_audio_s2_proxy,
+    build_higgs_audio_isolated_proxy,
+    build_qwen3_asr_isolated_proxy,
+    build_qwen3_tts_isolated_proxy,
+    build_step_audio_editx_isolated_proxy,
+    build_vibevoice_isolated_proxy,
+)
+from utils.models.comfyui_model_wrapper.cache_utils import invalidate_all_caches
 
 
 class UnifiedModelInterface:
@@ -26,6 +36,7 @@ class UnifiedModelInterface:
         """Initialize the unified interface"""
         self._model_factories: Dict[str, Callable] = {}
         self._pytorch_warning_shown = False
+        self._isolated_model_cache: Dict[str, Any] = {}
         
     def register_model_factory(self, 
                              engine_name: str, 
@@ -113,6 +124,11 @@ class UnifiedModelInterface:
         # Check PyTorch consistency on first model load
         self._check_pytorch_consistency()
 
+        if runtime_uses_isolation(config.runtime_mode):
+            return self._load_isolated_model(config, force_reload=force_reload)
+
+        self._clear_conflicting_isolated_models(config)
+
         # Apply transformers compatibility patches
         try:
             import __init__ as tts_suite_init
@@ -131,13 +147,16 @@ class UnifiedModelInterface:
         # CRITICAL: For engines that support multiple model variants (like Qwen3-TTS),
         # check if a DIFFERENT variant is already loaded and unload it to prevent device conflicts
         # Only applies to engines where model variants are mutually exclusive
-        if config.engine_name == "qwen3_tts":
-            # Check for any cached qwen3_tts model
-            cached_keys = [k for k in tts_model_manager._model_cache.keys() if k.startswith("qwen3_tts_tts_")]
+        if config.engine_name in (
+            "qwen3_tts", "moss_tts", "higgs_audio_v3", "dramabox"
+        ):
+            # Check for any cached mutually-exclusive model variant for this engine
+            cached_prefix = f"{config.engine_name}_tts_"
+            cached_keys = [k for k in tts_model_manager._model_cache.keys() if k.startswith(cached_prefix)]
             for existing_key in cached_keys:
                 if existing_key != cache_key:
                     # Different model variant is loaded - unload it first
-                    print(f"🗑️ Unloading old qwen3_tts model variant to prevent VRAM accumulation")
+                    print(f"🗑️ Unloading old {config.engine_name} model variant to prevent VRAM accumulation")
                     tts_model_manager.remove_model(existing_key)
 
                     # CRITICAL: Invalidate processor caches so they reload engines
@@ -188,6 +207,113 @@ class UnifiedModelInterface:
         )
 
         return wrapper
+
+    def _load_isolated_model(self, config: ModelLoadConfig, force_reload: bool = False) -> Any:
+        cache_key = self._generate_cache_key(config)
+
+        self._clear_conflicting_isolated_models(config)
+        self._clear_conflicting_embedded_models(config, keep_cache_key=cache_key)
+
+        if force_reload:
+            self._remove_isolated_model(cache_key)
+
+        cached = self._isolated_model_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        profile_name = config.runtime_profile or get_default_runtime_profile(config.engine_name or "")
+        config.runtime_profile = profile_name
+
+        if config.engine_name == "vibevoice" and config.model_type == "tts":
+            proxy = build_vibevoice_isolated_proxy(config)
+            self._isolated_model_cache[cache_key] = proxy
+            return proxy
+
+        if config.engine_name == "higgs_audio" and config.model_type == "tts":
+            proxy = build_higgs_audio_isolated_proxy(config)
+            self._isolated_model_cache[cache_key] = proxy
+            return proxy
+
+        if config.engine_name == "qwen3_tts" and config.model_type == "tts":
+            proxy = build_qwen3_tts_isolated_proxy(config)
+            self._isolated_model_cache[cache_key] = proxy
+            return proxy
+
+        if config.engine_name == "fish_audio_s2" and config.model_type == "tts":
+            proxy = build_fish_audio_s2_proxy(config)
+            self._isolated_model_cache[cache_key] = proxy
+            return proxy
+
+        if config.engine_name == "qwen3_asr" and config.model_type in ("asr", "aligner"):
+            proxy = build_qwen3_asr_isolated_proxy(config)
+            self._isolated_model_cache[cache_key] = proxy
+            return proxy
+
+        if config.engine_name == "step_audio_editx" and config.model_type == "tts":
+            proxy = build_step_audio_editx_isolated_proxy(config)
+            self._isolated_model_cache[cache_key] = proxy
+            return proxy
+
+        raise RuntimeError(
+            f"Isolated runtime is not implemented for engine '{config.engine_name}' "
+            f"(model_type='{config.model_type}', profile='{profile_name or '(none)'}')"
+        )
+
+    def _remove_isolated_model(self, cache_key: str) -> bool:
+        model = self._isolated_model_cache.pop(cache_key, None)
+        if model is None:
+            return False
+
+        cleanup = getattr(model, "cleanup", None) or getattr(model, "close", None)
+        if callable(cleanup):
+            try:
+                cleanup()
+            except Exception as e:
+                print(f"⚠️ Failed to clean up isolated runtime model: {e}")
+        invalidate_all_caches()
+        return True
+
+    def _clear_conflicting_isolated_models(self, config: ModelLoadConfig) -> None:
+        if config.model_type != "tts" or not str(config.device).startswith("cuda"):
+            return
+
+        keep_cache_key = self._generate_cache_key(config)
+        keys_to_remove = [
+            cache_key
+            for cache_key in list(self._isolated_model_cache.keys())
+            if "_tts_" in cache_key and cache_key != keep_cache_key
+        ]
+        if not keys_to_remove:
+            return
+
+        print(
+            f"🗑️ Shutting down {len(keys_to_remove)} isolated runtime TTS model(s) "
+            f"before loading {config.engine_name}"
+        )
+        for cache_key in keys_to_remove:
+            self._remove_isolated_model(cache_key)
+
+    def _clear_conflicting_embedded_models(self, config: ModelLoadConfig, keep_cache_key: Optional[str] = None) -> None:
+        if config.model_type != "tts" or not str(config.device).startswith("cuda"):
+            return
+
+        keys_to_remove = []
+        for cache_key, wrapper in list(tts_model_manager._model_cache.items()):
+            if wrapper.model_info.model_type != "tts":
+                continue
+            if keep_cache_key is not None and cache_key == keep_cache_key:
+                continue
+            keys_to_remove.append(cache_key)
+
+        if not keys_to_remove:
+            return
+
+        print(
+            f"🗑️ Unloading {len(keys_to_remove)} embedded TTS model(s) "
+            f"before starting isolated runtime for {config.engine_name}"
+        )
+        for cache_key in keys_to_remove:
+            tts_model_manager.remove_model(cache_key)
     
     def unload_model(self, config: ModelLoadConfig) -> bool:
         """
@@ -200,19 +326,36 @@ class UnifiedModelInterface:
             True if model was unloaded, False if not found
         """
         cache_key = self._generate_cache_key(config)
+        if runtime_uses_isolation(config.runtime_mode):
+            return self._remove_isolated_model(cache_key)
         return tts_model_manager.remove_model(cache_key)
     
     def clear_engine_models(self, engine_name: str) -> None:
         """Clear all models for a specific engine"""
+        isolated_to_remove = [
+            key for key in list(self._isolated_model_cache.keys())
+            if key.startswith(f"{engine_name}_")
+        ]
+        for cache_key in isolated_to_remove:
+            self._remove_isolated_model(cache_key)
         tts_model_manager.clear_cache(engine=engine_name)
     
     def clear_model_type(self, model_type: str) -> None:
         """Clear all models of a specific type"""
+        isolated_to_remove = [
+            key for key in list(self._isolated_model_cache.keys())
+            if f"_{model_type}_" in key
+        ]
+        for cache_key in isolated_to_remove:
+            self._remove_isolated_model(cache_key)
         tts_model_manager.clear_cache(model_type=model_type)
     
     def get_model_stats(self) -> Dict[str, Any]:
         """Get statistics about loaded models"""
-        return tts_model_manager.get_stats()
+        stats = tts_model_manager.get_stats()
+        stats["isolated_models"] = len(self._isolated_model_cache)
+        stats["isolated_model_keys"] = list(self._isolated_model_cache.keys())
+        return stats
 
     def get_cached_model(self, engine_name: str, model_type: str = "tts"):
         """
@@ -225,6 +368,10 @@ class UnifiedModelInterface:
         Returns:
             Cached model wrapper or None if not found
         """
+        for cache_key, model in self._isolated_model_cache.items():
+            if cache_key.startswith(f"{engine_name}_{model_type}_"):
+                return model
+
         # Search through cache for matching engine
         from utils.models.manager import tts_model_manager
         for cache_key in list(tts_model_manager._model_cache.keys()):
@@ -300,6 +447,13 @@ def _sanitize_loader_settings(device: str, torch_dtype, attn_implementation: str
 
 
 # Convenience functions for common model operations
+def _pop_runtime_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    return {
+        "runtime_mode": kwargs.pop("runtime_mode", "main_environment"),
+        "runtime_profile": kwargs.pop("runtime_profile", None),
+    }
+
+
 def load_tts_model(engine_name: str, 
                    model_name: str, 
                    device: str, 
@@ -324,6 +478,7 @@ def load_tts_model(engine_name: str,
     Returns:
         Loaded TTS model
     """
+    runtime_kwargs = _pop_runtime_kwargs(kwargs)
     config = ModelLoadConfig(
         engine_name=engine_name,
         model_type="tts",
@@ -332,7 +487,9 @@ def load_tts_model(engine_name: str,
         language=language,
         model_path=model_path,
         repo_id=repo_id,
-        additional_params=kwargs
+        additional_params=kwargs,
+        runtime_mode=runtime_kwargs["runtime_mode"],
+        runtime_profile=runtime_kwargs["runtime_profile"],
     )
     return unified_model_interface.load_model(config, force_reload)
 
@@ -348,6 +505,7 @@ def load_vc_model(engine_name: str,
     """
     Convenience function to load Voice Conversion models.
     """
+    runtime_kwargs = _pop_runtime_kwargs(kwargs)
     config = ModelLoadConfig(
         engine_name=engine_name,
         model_type="vc",
@@ -356,7 +514,9 @@ def load_vc_model(engine_name: str,
         language=language,
         model_path=model_path,
         repo_id=repo_id,
-        additional_params=kwargs
+        additional_params=kwargs,
+        runtime_mode=runtime_kwargs["runtime_mode"],
+        runtime_profile=runtime_kwargs["runtime_profile"],
     )
     return unified_model_interface.load_model(config, force_reload)
 
@@ -372,6 +532,7 @@ def load_auxiliary_model(engine_name: str,
     """
     Convenience function to load auxiliary models (tokenizers, HuBERT, etc.).
     """
+    runtime_kwargs = _pop_runtime_kwargs(kwargs)
     config = ModelLoadConfig(
         engine_name=engine_name,
         model_type=model_type,
@@ -379,7 +540,9 @@ def load_auxiliary_model(engine_name: str,
         device=device,
         model_path=model_path,
         repo_id=repo_id,
-        additional_params=kwargs
+        additional_params=kwargs,
+        runtime_mode=runtime_kwargs["runtime_mode"],
+        runtime_profile=runtime_kwargs["runtime_profile"],
     )
     return unified_model_interface.load_model(config, force_reload)
 
@@ -610,6 +773,39 @@ def register_higgs_audio_factory():
     unified_model_interface.register_model_factory("higgs_audio", "tts", higgs_audio_factory)
 
 
+def register_higgs_audio_v3_factory():
+    """Register native Higgs Audio v3 model factory."""
+
+    def higgs_audio_v3_factory(config: ModelLoadConfig):
+        from engines.higgs_audio_v3.higgs_audio_v3 import HiggsAudioV3Engine
+        from engines.higgs_audio_v3.higgs_audio_v3_downloader import HiggsAudioV3Downloader
+
+        model_name = config.model_name or "higgs-audio-v3-tts-4b"
+        model_path = config.model_path or model_name
+        device = config.device or "auto"
+
+        additional = config.additional_params or {}
+        dtype = additional.get("dtype", "auto")
+        attention = additional.get("attention", "auto")
+
+        downloader = HiggsAudioV3Downloader()
+        resolved_model_path = downloader.resolve_model_path(model_path)
+
+        print("🔄 Loading Higgs Audio v3 via unified interface")
+        print(f"   Model: {model_name}")
+        print(f"   Path: {resolved_model_path}")
+        print(f"   Device: {device} | Dtype: {dtype} | Attention: {attention}")
+
+        return HiggsAudioV3Engine(
+            model_path=resolved_model_path,
+            device=device,
+            dtype=dtype,
+            attention=attention,
+        )
+
+    unified_model_interface.register_model_factory("higgs_audio_v3", "tts", higgs_audio_v3_factory)
+
+
 def register_rvc_factory():
     """Register RVC model factories"""
     def rvc_factory(config: ModelLoadConfig):
@@ -697,9 +893,9 @@ def register_vibevoice_factory():
 
 
 def register_index_tts_factory():
-    """Register IndexTTS-2 model factory"""
+    """Register the shared IndexTTS-2 / IndexTTS-2.5 model factory."""
     def index_tts_factory(config: ModelLoadConfig):
-        """Factory for IndexTTS-2 models with ComfyUI integration"""
+        """Factory for versioned IndexTTS models with ComfyUI integration."""
         import os
         import sys
 
@@ -710,10 +906,16 @@ def register_index_tts_factory():
         use_cuda_kernel = config.additional_params.get("use_cuda_kernel", None) if config.additional_params else None
         use_deepspeed = config.additional_params.get("use_deepspeed", False) if config.additional_params else False
         use_torch_compile = config.additional_params.get("use_torch_compile", False) if config.additional_params else False
+        use_accel = config.additional_params.get("use_accel", False) if config.additional_params else False
         low_vram = config.additional_params.get("low_vram", False) if config.additional_params else False
+        requested_version = config.additional_params.get("model_version") if config.additional_params else None
+        is_v25 = requested_version == "2.5" or (
+            requested_version is None and os.path.isfile(os.path.join(model_path or "", "codec.pth"))
+        )
+        version_label = "IndexTTS-2.5" if is_v25 else "IndexTTS-2"
         
         if not model_path or not os.path.exists(model_path):
-            raise RuntimeError(f"IndexTTS-2 model not found at {model_path}. Auto-download should have been triggered earlier.")
+            raise RuntimeError(f"{version_label} model not found at {model_path}. Auto-download should have been triggered earlier.")
         
         try:
             # Add bundled IndexTTS path to sys.path so internal imports work
@@ -760,34 +962,50 @@ def register_index_tts_factory():
                 # Some other issue with indextts, proceed anyway
                 pass
 
-            # Import from our bundled IndexTTS engine
-            from engines.index_tts.indextts.infer_v2 import IndexTTS2
+            # TTS Audio Suite patch: Select the backend by model version while
+            # preserving the stable index_tts engine/cache identity.
+            if is_v25:
+                from engines.index_tts.indextts.infer_v2_5 import IndexTTS2
+            else:
+                from engines.index_tts.indextts.infer_v2 import IndexTTS2
             
             # Initialize IndexTTS-2 engine
             config_path = os.path.join(model_path, "config.yaml")
 
             # Verify config file exists after download
             if not os.path.exists(config_path):
-                raise RuntimeError(f"IndexTTS-2 config.yaml not found at {config_path} even after download. Please check model integrity.")
+                raise RuntimeError(f"{version_label} config.yaml not found at {config_path} even after download. Please check model integrity.")
             
-            engine = IndexTTS2(
+            common_kwargs = dict(
                 cfg_path=config_path,
                 model_dir=model_path,
                 device=device,
-                use_fp16=use_fp16 and device != "cpu",
                 use_cuda_kernel=use_cuda_kernel,
                 use_deepspeed=use_deepspeed,
                 use_torch_compile=use_torch_compile,
-                low_vram=low_vram
+                use_accel=use_accel,
+                low_vram=low_vram,
             )
+            if is_v25:
+                qwen_dir = os.path.join(model_path, "qwen0.6bemo4-merge")
+                engine = IndexTTS2(
+                    use_bf16=use_fp16 and device != "cpu",
+                    use_qwen_emo=os.path.isdir(qwen_dir),
+                    **common_kwargs,
+                )
+            else:
+                engine = IndexTTS2(
+                    use_fp16=use_fp16 and device != "cpu",
+                    **common_kwargs,
+                )
             
-            print(f"✅ IndexTTS-2 model loaded via unified interface on {device}")
+            print(f"✅ {version_label} model loaded via unified interface on {device}")
             return engine
             
         except ImportError as e:
-            raise ImportError(f"IndexTTS-2 dependencies not available. Error: {e}")
+            raise ImportError(f"{version_label} dependencies not available. Error: {e}")
         except Exception as e:
-            raise RuntimeError(f"Failed to load IndexTTS-2 model: {e}")
+            raise RuntimeError(f"Failed to load {version_label} model: {e}")
     
     unified_model_interface.register_model_factory("index_tts", "tts", index_tts_factory)
 
@@ -999,7 +1217,7 @@ def register_step_audio_editx_factory():
                     self.quantization = quantization
                     self.model_dir = model_path
 
-                def clone(self, prompt_wav_path, prompt_text, target_text, temperature=0.7, do_sample=True, max_new_tokens=8192, progress_bar=None):
+                def clone(self, prompt_wav_path, prompt_text, target_text, temperature=0.7, do_sample=True, max_new_tokens=1024, progress_bar=None):
                     """Delegate clone to raw TTS engine"""
                     return self._tts_engine.clone(
                         prompt_wav_path=prompt_wav_path,
@@ -1011,7 +1229,7 @@ def register_step_audio_editx_factory():
                         do_sample=do_sample
                     )
 
-                def edit_single(self, input_audio_path, audio_text, edit_type, edit_info=None, text=None, progress_bar=None, max_new_tokens=8192, temperature=0.7, do_sample=True):
+                def edit_single(self, input_audio_path, audio_text, edit_type, edit_info=None, text=None, progress_bar=None, max_new_tokens=1024, temperature=0.7, do_sample=True):
                     """Delegate edit_single to raw TTS engine"""
                     audio_tensor, sample_rate = self._tts_engine.edit(
                         input_audio_path=input_audio_path,
@@ -1031,7 +1249,7 @@ def register_step_audio_editx_factory():
                         audio_tensor = audio_tensor.squeeze(0)
                     return audio_tensor
 
-                def edit(self, input_audio_path, audio_text, edit_type, edit_info=None, text=None, progress_bar=None, max_new_tokens=8192, temperature=0.7, do_sample=True):
+                def edit(self, input_audio_path, audio_text, edit_type, edit_info=None, text=None, progress_bar=None, max_new_tokens=1024, temperature=0.7, do_sample=True):
                     """Alias for edit_single for compatibility"""
                     return self.edit_single(input_audio_path, audio_text, edit_type, edit_info, text, progress_bar, max_new_tokens, temperature, do_sample)
 
@@ -1273,12 +1491,82 @@ def register_cosyvoice_factory():
     unified_model_interface.register_model_factory("cosyvoice", "tts", cosyvoice_factory)
 
 
+def register_moss_tts_factory():
+    """Register MOSS-TTS model factory."""
+    def moss_tts_factory(config: ModelLoadConfig):
+        """Factory for official MOSS-TTS models with ComfyUI integration."""
+        import os
+
+        model_name = config.model_name or "MOSS-TTS-Local-Transformer"
+        model_path = config.model_path or model_name
+        device = config.device or "auto"
+        additional_params = config.additional_params or {}
+        dtype = additional_params.get("dtype", "auto")
+        attn_implementation = additional_params.get("attn_implementation", "auto")
+        codec_model = additional_params.get("codec_model", "MOSS-Audio-Tokenizer")
+        lora_adapter = additional_params.get("lora_adapter")
+
+        from engines.moss_tts.moss_tts import MossTTSEngine
+        from engines.moss_tts.moss_tts_downloader import MossTTSDownloader
+
+        downloader = MossTTSDownloader()
+        resolved_model_path = downloader.resolve_model_path(model_path)
+        resolved_codec_path = downloader.resolve_model_path(codec_model)
+
+        if not resolved_model_path or not os.path.exists(resolved_model_path):
+            raise RuntimeError(f"MOSS-TTS model not found at {resolved_model_path}")
+        if not resolved_codec_path or not os.path.exists(resolved_codec_path):
+            raise RuntimeError(f"MOSS-TTS audio tokenizer not found at {resolved_codec_path}")
+
+        print(f"🔄 Loading MOSS-TTS model via unified interface: {model_name}")
+        engine = MossTTSEngine(
+            model_path=resolved_model_path,
+            codec_path=resolved_codec_path,
+            model_variant=model_name.replace("local:", ""),
+            device=device,
+            dtype=dtype,
+            attn_implementation=attn_implementation,
+            lora_adapter=lora_adapter,
+        )
+        engine._ensure_model_loaded()
+        print(f"✅ MOSS-TTS model '{model_name}' loaded successfully")
+        return engine
+
+    unified_model_interface.register_model_factory("moss_tts", "tts", moss_tts_factory)
+
+
+def register_moss_soundeffect_v2_factory():
+    """Register the native MOSS-SoundEffect v2 diffusion pipeline."""
+
+    def moss_soundeffect_v2_factory(config: ModelLoadConfig):
+        from engines.moss_soundeffect_v2.downloader import MossSoundEffectV2Downloader
+        from engines.moss_soundeffect_v2.engine import MossSoundEffectV2Engine
+
+        model_name = config.model_name or MossSoundEffectV2Downloader.MODEL_NAME
+        model_path = config.model_path or model_name
+        dtype = (config.additional_params or {}).get("dtype", "auto")
+        resolved_model_path = MossSoundEffectV2Downloader().resolve_model_path(model_path)
+
+        engine = MossSoundEffectV2Engine(
+            model_path=resolved_model_path,
+            device=config.device or "auto",
+            dtype=dtype,
+        )
+        engine._ensure_model_loaded()
+        return engine
+
+    unified_model_interface.register_model_factory(
+        "moss_soundeffect_v2", "tts", moss_soundeffect_v2_factory
+    )
+
+
 def register_qwen3_tts_factory():
     """Register Qwen3-TTS model factory"""
     def qwen3_tts_factory(config: ModelLoadConfig):
         """Factory for Qwen3-TTS models with ComfyUI integration"""
         import os
         import sys
+        import importlib.metadata
         import torch
 
         # Extract parameters
@@ -1341,9 +1629,13 @@ def register_qwen3_tts_factory():
                 except ImportError:
                     try:
                         import flash_attn
+                        # flash_attn can import but still be broken (missing metadata on some Windows installs)
+                        importlib.metadata.version("flash_attn")
                         resolved_attn = "flash_attention_2"
                         print(f"[Qwen3-TTS] Auto-selected attention: flash_attention_2")
-                    except ImportError:
+                    except Exception as flash_err:
+                        if "flash_attn" in str(flash_err):
+                            print(f"[Qwen3-TTS] flash_attn unavailable/incomplete, falling back to sdpa: {flash_err}")
                         resolved_attn = "sdpa"  # PyTorch scaled dot product attention
                         print(f"[Qwen3-TTS] Auto-selected attention: sdpa")
             elif attn_implementation == "sage_attn":
@@ -1411,12 +1703,25 @@ def register_qwen3_tts_factory():
                     )
             else:
                 # Load with standard attention implementation
-                qwen3_model = Qwen3TTSModel.from_pretrained(
-                    pretrained_model_name_or_path=resolved_model_path,
-                    device_map=device,
-                    dtype=torch_dtype,
-                    attn_implementation=resolved_attn
-                )
+                try:
+                    qwen3_model = Qwen3TTSModel.from_pretrained(
+                        pretrained_model_name_or_path=resolved_model_path,
+                        device_map=device,
+                        dtype=torch_dtype,
+                        attn_implementation=resolved_attn
+                    )
+                except Exception as e:
+                    # Auto mode may still hit runtime flash-attn issues in some environments.
+                    if attn_implementation == "auto" and resolved_attn == "flash_attention_2" and "flash_attn" in str(e):
+                        print(f"⚠️ [Qwen3-TTS] Failed to load with flash_attention_2, retrying with sdpa: {e}")
+                        qwen3_model = Qwen3TTSModel.from_pretrained(
+                            pretrained_model_name_or_path=resolved_model_path,
+                            device_map=device,
+                            dtype=torch_dtype,
+                            attn_implementation="sdpa"
+                        )
+                    else:
+                        raise
 
             print(f"✅ Qwen3-TTS model '{model_name}' loaded successfully")
 
@@ -1429,6 +1734,97 @@ def register_qwen3_tts_factory():
             raise RuntimeError(f"Failed to load Qwen3-TTS model: {e}")
 
     unified_model_interface.register_model_factory("qwen3_tts", "tts", qwen3_tts_factory)
+
+
+def register_fish_audio_s2_factory():
+    """Register Fish S2; isolated routing constructs the actual proxy."""
+    def fish_audio_s2_factory(config: ModelLoadConfig):
+        return build_fish_audio_s2_proxy(config)
+    unified_model_interface.register_model_factory("fish_audio_s2", "tts", fish_audio_s2_factory)
+
+
+def register_dots_tts_factory():
+    """Register Dots TTS model factory."""
+    def dots_tts_factory(config: ModelLoadConfig):
+        """Factory for official Dots TTS models with ComfyUI integration."""
+        model_name = config.model_name or "dots.tts-soar"
+        device = config.device or "auto"
+        additional_params = config.additional_params or {}
+        precision = additional_params.get("precision", "auto")
+        optimize = bool(additional_params.get("optimize", False))
+        max_generate_length = int(additional_params.get("max_generate_length", 500))
+
+        from engines.dots_tts.dots_tts_engine import DotsTTSEngine
+
+        print(f"🔄 Loading Dots TTS model via unified interface: {model_name}")
+        engine = DotsTTSEngine(
+            model_name=model_name,
+            device=device,
+            precision=precision,
+            optimize=optimize,
+            max_generate_length=max_generate_length,
+        )
+        engine._ensure_runtime_loaded()
+        print(f"✅ Dots TTS model '{model_name}' loaded successfully")
+        return engine
+
+    unified_model_interface.register_model_factory("dots_tts", "tts", dots_tts_factory)
+
+
+def register_dramabox_factory():
+    """Register official DramaBox in the main Transformers 5 environment."""
+    def dramabox_factory(config: ModelLoadConfig):
+        from engines.dramabox.dramabox_downloader import DramaBoxDownloader
+        from engines.dramabox.dramabox_engine import DramaBoxEngine
+
+        model_name = config.model_name or DramaBoxDownloader.MODEL_NAME
+        device = config.device or "auto"
+        additional_params = config.additional_params or {}
+        precision = additional_params.get("precision", "auto")
+        model_paths = DramaBoxDownloader().resolve_model_path(model_name)
+
+        print(f"🔄 Loading DramaBox via unified interface: {model_name}")
+        engine = DramaBoxEngine(
+            model_name=model_name,
+            device=device,
+            precision=precision,
+            model_paths=model_paths,
+            memory_mode=additional_params.get("memory_mode", "fast"),
+            transformer_quantization=additional_params.get(
+                "transformer_quantization", "none"
+            ),
+            compile_model=bool(additional_params.get("compile_model", False)),
+        )
+        engine._ensure_runtime_loaded()
+        print(f"✅ DramaBox model '{model_name}' loaded successfully")
+        return engine
+
+    unified_model_interface.register_model_factory("dramabox", "tts", dramabox_factory)
+
+
+def register_omnivoice_factory():
+    """Register OmniVoice model factory."""
+
+    def omnivoice_factory(config: ModelLoadConfig):
+        """Factory for official OmniVoice models with ComfyUI integration."""
+        model_name = config.model_name or "OmniVoice"
+        device = config.device or "auto"
+        additional_params = config.additional_params or {}
+        dtype = additional_params.get("dtype", "auto")
+
+        from engines.omnivoice.omnivoice_engine import OmniVoiceEngine
+
+        print(f"🔄 Loading OmniVoice model via unified interface: {model_name}")
+        engine = OmniVoiceEngine(
+            model_name=model_name,
+            device=device,
+            dtype=dtype,
+        )
+        engine._ensure_model_loaded()
+        print(f"✅ OmniVoice model '{model_name}' loaded successfully")
+        return engine
+
+    unified_model_interface.register_model_factory("omnivoice", "tts", omnivoice_factory)
 
 
 def register_qwen3_asr_factory():
@@ -1632,11 +2028,18 @@ def initialize_all_factories():
     register_step_audio_editx_factory()
     register_echo_tts_factory()
     register_higgs_audio_factory()
+    register_higgs_audio_v3_factory()
     register_rvc_factory()
     register_vibevoice_factory()
     register_index_tts_factory()
     register_cosyvoice_factory()
+    register_moss_tts_factory()
+    register_moss_soundeffect_v2_factory()
     register_qwen3_tts_factory()
+    register_fish_audio_s2_factory()
+    register_dots_tts_factory()
+    register_dramabox_factory()
+    register_omnivoice_factory()
     register_qwen3_asr_factory()
     register_qwen3_aligner_factory()
     register_granite_asr_factory()

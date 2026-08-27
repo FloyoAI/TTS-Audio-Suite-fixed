@@ -9,8 +9,14 @@ Parameters override node defaults for a single segment, then revert after.
 
 from typing import Dict, List, Tuple, Optional, Any
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+INDEX_TTS_EMOTIONS = (
+    'happy', 'angry', 'sad', 'afraid', 'disgusted',
+    'melancholic', 'surprised', 'calm'
+)
 
 
 # Parameter aliases: user_input -> canonical_name
@@ -21,7 +27,34 @@ PARAMETER_ALIASES = {
     'cfg': 'cfg',
     'cfg_weight': 'cfg',  # cfg_weight alias -> cfg (more universal)
     'cfgweight': 'cfg',
+    'cfg_scale': 'cfg',
+    'stg': 'stg_scale',
+    'stg_scale': 'stg_scale',
+    'duration_multiplier': 'duration_multiplier',
+    'dur_mult': 'duration_multiplier',
+    'duration_factor': 'duration_factor',
+    'dur_factor': 'duration_factor',
+    'gen_duration': 'gen_duration',
+    'generation_duration': 'gen_duration',
+    'ref_duration': 'ref_duration',
+    'reference_duration': 'ref_duration',
+    'rescale': 'rescale_scale',
+    'rescale_scale': 'rescale_scale',
+    'prompt_template': 'prompt_template',
+    'template': 'prompt_template',
     'num_steps': 'num_steps',
+    'num_step': 'num_steps',
+    'guidance_scale': 'guidance_scale',
+    'guidance': 'guidance_scale',
+    'duration': 'duration',
+    't_shift': 't_shift',
+    'layer_penalty_factor': 'layer_penalty_factor',
+    'position_temperature': 'position_temperature',
+    'class_temperature': 'class_temperature',
+    'audio_chunk_duration': 'audio_chunk_duration',
+    'audio_chunk_threshold': 'audio_chunk_threshold',
+    'speaker_scale': 'speaker_scale',
+    'speaker_guidance': 'speaker_scale',
     'cfg_text': 'cfg_scale_text',
     'cfg_scale_text': 'cfg_scale_text',
     'cfg_speaker': 'cfg_scale_speaker',
@@ -44,28 +77,107 @@ PARAMETER_ALIASES = {
     'top_k': 'top_k',
     'topk': 'top_k',
     'topp': 'top_p',
+    'audio_temp': 'audio_temperature',
+    'audio_temperature': 'audio_temperature',
+    'audio_top_p': 'audio_top_p',
+    'audio_top_k': 'audio_top_k',
+    'rep_penalty': 'repetition_penalty',
+    'repetition_penalty': 'repetition_penalty',
+    'audio_rep_penalty': 'audio_repetition_penalty',
+    'audio_repetition_penalty': 'audio_repetition_penalty',
+    'tokens': 'duration_tokens',
+    'duration_tokens': 'duration_tokens',
+    'max_new_tokens': 'max_new_tokens',
+    'max_generate_length': 'max_generate_length',
+    'max_audio_patches': 'max_generate_length',
+    'n_vq': 'n_vq_for_inference',
+    'n_vq_for_inference': 'n_vq_for_inference',
+    'instruction': 'instruction',
+    'quality': 'quality',
+    'sound_event': 'sound_event',
+    'ambient_sound': 'ambient_sound',
     'inference_steps': 'inference_steps',
     'steps': 'inference_steps',
+    'sigma_shift': 'sigma_shift',
+    'negative_prompt': 'negative_prompt',
+    'negative': 'negative_prompt',
+    'neg': 'negative_prompt',
+    'duration_seconds': 'duration_seconds',
+    'seconds': 'duration_seconds',
     'emotion_alpha': 'emotion_alpha',
-    # NOTE: 'emotion' intentionally NOT aliased to avoid confusion with emotion reference syntax [Alice:Bob]
+    'vector': 'emotion_vector_inline',
+    'emotion': 'emotion_text_inline',
+    **{name: f'emotion_{name}_inline' for name in INDEX_TTS_EMOTIONS},
+    # [emotion:...] is reserved for IndexTTS text emotion. Character audio
+    # references remain unambiguous because their key is the character name.
 }
 
 # Parameter compatibility matrix: canonical_name -> set of engine_types
 PARAMETER_ENGINES = {
     'seed': {
         'chatterbox', 'chatterbox_official_23lang', 'f5tts', 'higgs_audio',
-        'vibevoice', 'index_tts', 'step_audio_editx', 'cosyvoice', 'qwen3_tts',
-        'echo_tts'
+        'higgs_audio_v3', 'vibevoice', 'index_tts', 'step_audio_editx', 'cosyvoice', 'qwen3_tts',
+        'dots_tts', 'fish_audio_s2', 'omnivoice',
+        'echo_tts', 'moss_tts', 'moss_soundeffect_v2', 'dramabox'
     },
     'temperature': {
         'chatterbox', 'chatterbox_official_23lang', 'f5tts', 'higgs_audio',
-        'vibevoice', 'index_tts', 'step_audio_editx', 'qwen3_tts'
+        'higgs_audio_v3', 'vibevoice', 'index_tts', 'step_audio_editx', 'qwen3_tts', 'moss_tts', 'fish_audio_s2'
     },
     'cfg': {
-        'f5tts', 'vibevoice', 'index_tts', 'chatterbox', 'chatterbox_official_23lang'
+        'f5tts', 'vibevoice', 'index_tts', 'chatterbox', 'chatterbox_official_23lang',
+        'moss_soundeffect_v2', 'dramabox'
+    },
+    'stg_scale': {
+        'dramabox'
+    },
+    'duration_multiplier': {
+        'dramabox'
+    },
+    'duration_factor': {
+        'index_tts'
+    },
+    'gen_duration': {
+        'dramabox'
+    },
+    'ref_duration': {
+        'dramabox'
+    },
+    'rescale_scale': {
+        'dramabox'
+    },
+    'prompt_template': {
+        'dramabox'
     },
     'num_steps': {
-        'echo_tts'
+        'echo_tts', 'dots_tts', 'omnivoice'
+    },
+    'guidance_scale': {
+        'dots_tts', 'omnivoice'
+    },
+    'duration': {
+        'omnivoice'
+    },
+    't_shift': {
+        'omnivoice'
+    },
+    'layer_penalty_factor': {
+        'omnivoice'
+    },
+    'position_temperature': {
+        'omnivoice'
+    },
+    'class_temperature': {
+        'omnivoice'
+    },
+    'audio_chunk_duration': {
+        'omnivoice'
+    },
+    'audio_chunk_threshold': {
+        'omnivoice'
+    },
+    'speaker_scale': {
+        'dots_tts'
     },
     'cfg_scale_text': {
         'echo_tts'
@@ -104,20 +216,71 @@ PARAMETER_ENGINES = {
         'chatterbox', 'chatterbox_official_23lang'
     },
     'speed': {
-        'f5tts', 'cosyvoice'
+        'f5tts', 'cosyvoice', 'omnivoice'
     },
     'top_p': {
-        'higgs_audio', 'vibevoice', 'index_tts', 'qwen3_tts'
+        'higgs_audio', 'higgs_audio_v3', 'vibevoice', 'index_tts', 'qwen3_tts', 'moss_tts', 'fish_audio_s2'
     },
     'top_k': {
-        'higgs_audio', 'index_tts', 'qwen3_tts'
+        'higgs_audio', 'higgs_audio_v3', 'index_tts', 'qwen3_tts', 'moss_tts'
+    },
+    'audio_temperature': {
+        'moss_tts'
+    },
+    'audio_top_p': {
+        'moss_tts'
+    },
+    'audio_top_k': {
+        'moss_tts'
+    },
+    'repetition_penalty': {
+        'moss_tts', 'fish_audio_s2'
+    },
+    'audio_repetition_penalty': {
+        'moss_tts'
+    },
+    'duration_tokens': {
+        'moss_tts'
+    },
+    'max_new_tokens': {
+        'higgs_audio_v3', 'moss_tts', 'fish_audio_s2'
+    },
+    'max_generate_length': {
+        'dots_tts'
+    },
+    'n_vq_for_inference': {
+        'moss_tts'
+    },
+    'instruction': {
+        'moss_tts'
+    },
+    'quality': {
+        'moss_tts'
+    },
+    'sound_event': {
+        'moss_tts'
+    },
+    'ambient_sound': {
+        'moss_tts'
     },
     'inference_steps': {
-        'vibevoice'
+        'vibevoice', 'moss_soundeffect_v2'
+    },
+    'sigma_shift': {
+        'moss_soundeffect_v2'
+    },
+    'negative_prompt': {
+        'moss_soundeffect_v2', 'dramabox'
+    },
+    'duration_seconds': {
+        'moss_tts', 'moss_soundeffect_v2'
     },
     'emotion_alpha': {
         'index_tts'
-    }
+    },
+    'emotion_vector_inline': {'index_tts'},
+    'emotion_text_inline': {'index_tts'},
+    **{f'emotion_{name}_inline': {'index_tts'} for name in INDEX_TTS_EMOTIONS},
 }
 
 # Parameter type validation: canonical_name -> (type, min, max, description)
@@ -125,7 +288,23 @@ PARAMETER_VALIDATION = {
     'seed': (int, 0, 2**32 - 1, "Random seed for reproducible generation"),
     'temperature': (float, 0.1, 2.0, "Randomness/creativity control (lower=more deterministic)"),
     'cfg': (float, 0.0, 20.0, "Classifier-free guidance strength"),
+    'stg_scale': (float, 0.0, 5.0, "DramaBox skip-token guidance strength"),
+    'duration_multiplier': (float, 0.5, 3.0, "DramaBox estimated-duration multiplier"),
+    'duration_factor': (float, 0.5, 2.0, "IndexTTS-2.5 internal feature-duration scaling"),
+    'gen_duration': (float, 0.0, 60.0, "DramaBox explicit output duration"),
+    'ref_duration': (float, 3.0, 30.0, "DramaBox reference-audio duration"),
+    'rescale_scale': (str, None, None, "DramaBox CFG rescale: auto or 0 to 1"),
+    'prompt_template': (str, None, None, "DramaBox per-segment prompt template using {seg}"),
     'num_steps': (int, 1, 200, "Number of inference steps"),
+    'guidance_scale': (float, 0.0, 10.0, "Classifier-free guidance scale"),
+    'duration': (float, 0.0, 600.0, "Fixed output duration in seconds"),
+    't_shift': (float, 0.0, 1.0, "Noise schedule time-step shift"),
+    'layer_penalty_factor': (float, 0.0, 10.0, "Penalty encouraging lower codebook layers first"),
+    'position_temperature': (float, 0.0, 10.0, "Mask-position sampling temperature"),
+    'class_temperature': (float, 0.0, 2.0, "Token sampling temperature"),
+    'audio_chunk_duration': (float, 1.0, 60.0, "Native long-form chunk target duration in seconds"),
+    'audio_chunk_threshold': (float, 1.0, 180.0, "Native long-form chunking activation threshold in seconds"),
+    'speaker_scale': (float, 0.0, 5.0, "Dots TTS speaker conditioning scale"),
     'cfg_scale_text': (float, 0.0, 20.0, "CFG scale for text guidance (Echo-TTS)"),
     'cfg_scale_speaker': (float, 0.0, 20.0, "CFG scale for speaker guidance (Echo-TTS)"),
     'cfg_min_t': (float, 0.0, 1.0, "CFG minimum t value (Echo-TTS)"),
@@ -138,11 +317,33 @@ PARAMETER_VALIDATION = {
     'speaker_kv_min_t': (float, 0.0, 1.0, "Speaker KV min t (Echo-TTS)"),
     'sequence_length': (int, 1, 2048, "Sequence length / block size (Echo-TTS)"),
     'exaggeration': (float, 0.0, 2.0, "Voice emotion exaggeration (ChatterBox only)"),
-    'speed': (float, 0.5, 2.0, "Speech speed multiplier (F5-TTS only)"),
+    'speed': (float, 0.25, 3.0, "Speech speed multiplier"),
     'top_p': (float, 0.0, 1.0, "Nucleus sampling probability"),
     'top_k': (int, 1, 100, "Top-k sampling"),
-    'inference_steps': (int, 1, 100, "Number of inference steps"),
-    'emotion_alpha': (float, 0.0, 1.0, "Emotion strength (IndexTTS-2 only)")
+    'audio_temperature': (float, 0.1, 2.5, "MOSS-TTS audio sampling temperature"),
+    'audio_top_p': (float, 0.0, 1.0, "MOSS-TTS audio nucleus sampling probability"),
+    'audio_top_k': (int, 1, 200, "MOSS-TTS audio top-k sampling"),
+    'repetition_penalty': (float, 0.5, 3.0, "Audio repetition penalty"),
+    'audio_repetition_penalty': (float, 0.5, 3.0, "MOSS-TTS audio repetition penalty"),
+    'duration_tokens': (int, 0, 8192, "MOSS-TTS duration hint in audio tokens"),
+    'max_new_tokens': (int, 64, 16384, "Maximum generated tokens"),
+    'max_generate_length': (int, 32, 1024, "Dots TTS maximum audio patch budget"),
+    'n_vq_for_inference': (int, 0, 32, "MOSS-TTS Local Transformer RVQ layers for inference"),
+    'instruction': (str, None, None, "MOSS-TTS whole-segment instruction"),
+    'quality': (str, None, None, "MOSS-TTS whole-segment quality hint"),
+    'sound_event': (str, None, None, "MOSS-TTS whole-segment sound event hint"),
+    'ambient_sound': (str, None, None, "MOSS-TTS whole-segment ambient sound hint"),
+    'inference_steps': (int, 1, 150, "Number of inference steps"),
+    'sigma_shift': (float, 0.0, 10.0, "Flow-matching schedule shift"),
+    'negative_prompt': (str, None, None, "Sounds or qualities to discourage"),
+    'duration_seconds': (float, 0.5, 300.0, "Sound-effect segment duration in seconds"),
+    'emotion_alpha': (float, 0.0, 1.0, "Emotion strength (IndexTTS-2 only)"),
+    # Keep inline emotion values as strings so an explicit leading sign remains
+    # available to distinguish deltas from absolute replacements.
+    'emotion_vector_inline': (str, None, None, "Ordered IndexTTS-2 emotion vector"),
+    'emotion_text_inline': (str, None, None, "IndexTTS-2 emotion preset or quoted text"),
+    **{f'emotion_{name}_inline': (str, None, None, f"IndexTTS-2 {name} value")
+       for name in INDEX_TTS_EMOTIONS},
 }
 
 # Mapping of canonical parameter names to node config keys (handles engine-specific naming)
@@ -150,8 +351,29 @@ PARAMETER_VALIDATION = {
 PARAMETER_NODE_KEYS = {
     'seed': 'seed',
     'temperature': 'temperature',
-    'cfg': {'default': 'cfg_weight', 'f5tts': 'cfg_strength'},  # Engine-specific mapping
+    'cfg': {
+        'default': 'cfg_weight',
+        'f5tts': 'cfg_strength',
+        'moss_soundeffect_v2': 'cfg_scale',
+        'dramabox': 'cfg_scale',
+    },  # Engine-specific mapping
+    'stg_scale': 'stg_scale',
+    'duration_multiplier': 'duration_multiplier',
+    'duration_factor': 'duration_factor',
+    'gen_duration': 'gen_duration',
+    'ref_duration': 'ref_duration',
+    'rescale_scale': 'rescale_scale',
+    'prompt_template': 'prompt_template',
     'num_steps': 'num_steps',
+    'guidance_scale': 'guidance_scale',
+    'duration': 'duration',
+    't_shift': 't_shift',
+    'layer_penalty_factor': 'layer_penalty_factor',
+    'position_temperature': 'position_temperature',
+    'class_temperature': 'class_temperature',
+    'audio_chunk_duration': 'audio_chunk_duration',
+    'audio_chunk_threshold': 'audio_chunk_threshold',
+    'speaker_scale': 'speaker_scale',
     'cfg_scale_text': 'cfg_scale_text',
     'cfg_scale_speaker': 'cfg_scale_speaker',
     'cfg_min_t': 'cfg_min_t',
@@ -167,8 +389,27 @@ PARAMETER_NODE_KEYS = {
     'speed': 'speed',
     'top_p': 'top_p',
     'top_k': 'top_k',
+    'audio_temperature': 'audio_temperature',
+    'audio_top_p': 'audio_top_p',
+    'audio_top_k': 'audio_top_k',
+    'repetition_penalty': 'repetition_penalty',
+    'audio_repetition_penalty': 'audio_repetition_penalty',
+    'duration_tokens': 'duration_tokens',
+    'max_new_tokens': 'max_new_tokens',
+    'max_generate_length': 'max_generate_length',
+    'n_vq_for_inference': 'n_vq_for_inference',
+    'instruction': 'instruction',
+    'quality': 'quality',
+    'sound_event': 'sound_event',
+    'ambient_sound': 'ambient_sound',
     'inference_steps': 'inference_steps',
-    'emotion_alpha': 'emotion_alpha'
+    'sigma_shift': 'sigma_shift',
+    'negative_prompt': 'negative_prompt',
+    'duration_seconds': 'duration_seconds',
+    'emotion_alpha': 'emotion_alpha',
+    'emotion_vector_inline': 'emotion_vector_inline',
+    'emotion_text_inline': 'emotion_text_inline',
+    **{f'emotion_{name}_inline': f'emotion_{name}_inline' for name in INDEX_TTS_EMOTIONS},
 }
 
 
@@ -228,11 +469,24 @@ class ParameterValidator:
                 converted = int(float(value))  # Handle "42.0" -> 42
             elif expected_type == float:
                 converted = float(value)
+            elif expected_type == str:
+                converted = str(value).strip()
+                if not converted:
+                    return False, f"{param_name} must be a non-empty string", value
             else:
                 converted = value
 
+            if param_name == 'rescale_scale':
+                normalized = str(converted).strip().lower()
+                if normalized == 'auto':
+                    converted = 'auto'
+                else:
+                    converted = float(normalized)
+                    if not 0.0 <= converted <= 1.0:
+                        return False, "rescale_scale must be 'auto' or between 0 and 1", value
+
             # Check bounds
-            if converted < min_val or converted > max_val:
+            if min_val is not None and max_val is not None and (converted < min_val or converted > max_val):
                 return False, f"{param_name} must be between {min_val} and {max_val}, got {converted}", value
 
             return True, None, converted
@@ -318,6 +572,14 @@ class SegmentParameterParser:
 
                 # Try to normalize parameter name (handles aliases and case-insensitivity)
                 canonical_name = ParameterValidator.normalize_parameter_name(key_stripped)
+
+                # A character may legitimately be named after an emotion. Only a
+                # numeric value turns [sad:...] into an inline vector control;
+                # [sad:audio_ref] must remain a character emotion-reference tag.
+                if key_stripped.lower() in INDEX_TTS_EMOTIONS and not re.fullmatch(
+                    r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)', value
+                ):
+                    canonical_name = None
 
                 if canonical_name:
                     # It's a parameter - validate and add
@@ -405,6 +667,31 @@ class SegmentParameterCollector:
         cleaned_text = tag_pattern.sub(replace_tag, text).strip()
 
         return cleaned_text, parameters, character_name
+
+
+def parse_parameter_segments(text: str) -> List[Tuple[str, Dict[str, Any]]]:
+    """Split text on parameter-only tags without applying character semantics."""
+    tag_pattern = re.compile(r'\[([^\]]+)\]')
+    segments: List[Tuple[str, Dict[str, Any]]] = []
+
+    for line in str(text or "").splitlines():
+        cursor = 0
+        current_parameters: Dict[str, Any] = {}
+        for match in tag_pattern.finditer(line):
+            tag_segments, tag_parameters = SegmentParameterParser.parse_tag_segments(match.group(1))
+            if not tag_parameters or tag_segments:
+                continue
+            before_tag = line[cursor:match.start()].strip()
+            if before_tag:
+                segments.append((before_tag, current_parameters.copy()))
+            current_parameters = tag_parameters.copy()
+            cursor = match.end()
+
+        remaining = line[cursor:].strip()
+        if remaining:
+            segments.append((remaining, current_parameters.copy()))
+
+    return segments
 
 
 def parse_segment_text(text: str) -> Tuple[str, Dict[str, Any], Optional[str]]:

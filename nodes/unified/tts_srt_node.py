@@ -84,7 +84,7 @@ Hello! This is unified SRT TTS with character switching.
                 }),
                 "narrator_voice": (reference_files, {
                     "default": "none",
-                    "tooltip": "Fallback narrator voice from voice folders. Used when opt_narrator is not connected. Select 'none' if you only use opt_narrator input."
+                    "tooltip": "Fallback narrator voice from voice folders. Used when opt_narrator is not connected. Select 'none' for engines that support direct TTS without voice cloning, such as MOSS."
                 }),
                 "seed": ("INT", {
                     "default": 1, "min": 0, "max": 2**32 - 1,
@@ -135,6 +135,10 @@ Hello! This is unified SRT TTS with character switching.
                     "default": 0, "min": 0, "max": 32, "step": 1,
                     "tooltip": "Parallel processing workers. 0 = sequential (recommended), 2+ = streaming mode. Note: Streaming often slower than sequential mode. F5-TTS doesn't support streaming yet."
                 }),
+                "use_native_duration_targeting": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "When enabled, supported engines such as OmniVoice and DramaBox use the model's native duration parameter for each subtitle during generation. This helps the model aim closer to the subtitle length before the suite applies final timing adjustment, which can reduce stretching/compression and sound more natural."
+                }),
             }
         }
 
@@ -184,23 +188,83 @@ Hello! This is unified SRT TTS with character switching.
                 if 'chunk_minutes' in config:
                     stable_params['chunk_minutes'] = config.get('chunk_minutes', 0)
 
-            # For ChatterBox Official 23-Lang, include model_version in cache key since v1/v2 are different models
+            if engine_type == "step_audio_editx":
+                stable_params['quantization'] = config.get('quantization', 'none')
+                stable_params['torch_dtype'] = config.get('torch_dtype', 'bfloat16')
+                stable_params['runtime_mode'] = config.get('runtime_mode', 'shared_runtime')
+                stable_params['runtime_profile'] = config.get('runtime_profile')
+
+            # ChatterBox multilingual T3 versions are distinct checkpoints.
             if engine_type == "chatterbox_official_23lang":
                 stable_params['model_version'] = config.get('model_version', 'v1')
 
-            # For Qwen3-TTS, include voice_preset, model_size, attn_implementation,
-            # and optimization settings since they determine model type and require model reload
-            # NOTE: instruct is a generation parameter, doesn't require model reload
+            # Qwen checkpoints can share a size while serving different roles, so cache
+            # by the explicit checkpoint identity rather than inferring it from the preset.
             if engine_type == "qwen3_tts":
+                stable_params['model_name'] = config.get('model_name')
+                stable_params['model_path'] = config.get('model_path')
+                stable_params['model_type'] = config.get('model_type')
                 stable_params['voice_preset'] = config.get('voice_preset', 'None (Zero-shot / Custom)')
                 stable_params['instruct'] = config.get('instruct', '')
                 stable_params['model_size'] = config.get('model_size', '1.7B')
+                stable_params['dtype'] = config.get('dtype', 'auto')
                 stable_params['attn_implementation'] = config.get('attn_implementation', 'auto')
+                stable_params['runtime_mode'] = config.get('runtime_mode')
+                stable_params['runtime_profile'] = config.get('runtime_profile')
                 # CRITICAL: Include optimization settings - changing these requires model reload
                 # Without this, SRT and TTS text nodes would have different cache keys for the same model
                 stable_params['use_torch_compile'] = config.get('use_torch_compile', False)
                 stable_params['use_cuda_graphs'] = config.get('use_cuda_graphs', False)
                 stable_params['compile_mode'] = config.get('compile_mode', 'default')
+
+            if engine_type == "dots_tts":
+                stable_params['model_variant'] = config.get('model_variant', 'dots.tts-soar')
+                stable_params['precision'] = config.get('precision', 'auto')
+                stable_params['optimize'] = config.get('optimize', False)
+                stable_params['max_generate_length'] = config.get('max_generate_length', 500)
+
+            if engine_type == "dramabox":
+                stable_params['model_name'] = config.get('model_name', 'DramaBox')
+                stable_params['precision'] = config.get('precision', 'auto')
+                stable_params['memory_mode'] = config.get('memory_mode', 'fast')
+                stable_params['transformer_quantization'] = config.get('transformer_quantization', 'none')
+                stable_params['compile_model'] = config.get('compile_model', False)
+
+            if engine_type == "fish_audio_s2":
+                stable_params['model_variant'] = config.get('model_variant', 's2-pro')
+                stable_params['precision'] = config.get('precision', 'bfloat16')
+                stable_params['compile'] = config.get('compile', False)
+                stable_params['quantization'] = config.get('quantization', 'none')
+                stable_params['multi_speaker_mode'] = config.get('multi_speaker_mode', 'Native Multi-Speaker')
+                stable_params['language_prompting'] = config.get('language_prompting', 'Auto Inline Tag')
+
+            if engine_type == "omnivoice":
+                stable_params['model_variant'] = config.get('model_variant', 'OmniVoice')
+                stable_params['dtype'] = config.get('dtype', 'auto')
+
+            if engine_type == "moss_tts":
+                stable_params['model_variant'] = config.get('model_variant', 'MOSS-TTS-Local-Transformer')
+                stable_params['multi_speaker_mode'] = config.get('multi_speaker_mode', 'Custom Character Switching')
+                stable_params['dtype'] = config.get('dtype', 'auto')
+                stable_params['attn_implementation'] = config.get('attn_implementation', 'auto')
+                stable_params['codec_model'] = config.get('codec_model', 'MOSS-Audio-Tokenizer')
+
+            if engine_type == "higgs_audio_v3":
+                stable_params['model'] = config.get('model', 'higgs-audio-v3-tts-4b')
+                stable_params['dtype'] = config.get('dtype', 'auto')
+                stable_params['attention'] = config.get('attention', 'auto')
+
+            # IndexTTS 2.0 and 2.5 are distinct checkpoints/backends. Every
+            # load-time option must participate in the processor cache key or
+            # changing the engine node can silently keep the old adapter alive.
+            if engine_type == "index_tts":
+                stable_params['model_path'] = config.get('model_path', 'IndexTTS-2')
+                stable_params['use_fp16'] = config.get('use_fp16', True)
+                stable_params['use_cuda_kernel'] = config.get('use_cuda_kernel')
+                stable_params['use_deepspeed'] = config.get('use_deepspeed', False)
+                stable_params['use_torch_compile'] = config.get('use_torch_compile', False)
+                stable_params['use_accel'] = config.get('use_accel', False)
+                stable_params['low_vram'] = config.get('low_vram', False)
 
             # For CosyVoice, include actual model identity and load options in cache key.
             # RL and base variants share one folder but use different llm files, so
@@ -481,6 +545,170 @@ Hello! This is unified SRT TTS with character switching.
                 }
                 return engine_instance
 
+            elif engine_type == "dots_tts":
+                dots_tts_srt_processor_path = os.path.join(nodes_dir, "dots_tts", "dots_tts_srt_processor.py")
+                dots_tts_srt_spec = importlib.util.spec_from_file_location("dots_tts_srt_processor_module", dots_tts_srt_processor_path)
+                dots_tts_srt_module = importlib.util.module_from_spec(dots_tts_srt_spec)
+                dots_tts_srt_spec.loader.exec_module(dots_tts_srt_module)
+
+                DotsTTSSRTProcessor = dots_tts_srt_module.DotsTTSSRTProcessor
+
+                class DotsTTSSRTWrapper:
+                    def __init__(self, config):
+                        self.config = config
+                        self.processor = DotsTTSSRTProcessor(self, config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.processor.update_config(new_config)
+
+                    def process_with_error_handling(self, func):
+                        try:
+                            return func()
+                        except Exception as e:
+                            raise e
+
+                    def format_audio_output(self, audio_tensor, sample_rate):
+                        if audio_tensor.is_cuda:
+                            audio_tensor = audio_tensor.cpu()
+                        if audio_tensor.dim() == 1:
+                            audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
+                        elif audio_tensor.dim() == 2:
+                            audio_tensor = audio_tensor.unsqueeze(0)
+                        return {"waveform": audio_tensor, "sample_rate": sample_rate}
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError("Dots TTS SRT processing interrupted by user")
+
+                engine_instance = DotsTTSSRTWrapper(config)
+
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
+            elif engine_type == "dramabox":
+                processor_path = os.path.join(
+                    nodes_dir, "dramabox", "dramabox_srt_processor.py"
+                )
+                processor_spec = importlib.util.spec_from_file_location(
+                    "dramabox_srt_processor_module", processor_path
+                )
+                processor_module = importlib.util.module_from_spec(processor_spec)
+                processor_spec.loader.exec_module(processor_module)
+                DramaBoxSRTProcessor = processor_module.DramaBoxSRTProcessor
+
+                class DramaBoxSRTWrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.processor = DramaBoxSRTProcessor(self, self.config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.processor.update_config(new_config)
+
+                    def process_with_error_handling(self, func):
+                        return func()
+
+                    def format_audio_output(self, audio_tensor, sample_rate):
+                        if audio_tensor.is_cuda:
+                            audio_tensor = audio_tensor.cpu()
+                        if audio_tensor.dim() == 1:
+                            audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
+                        elif audio_tensor.dim() == 2:
+                            audio_tensor = audio_tensor.unsqueeze(0)
+                        return {"waveform": audio_tensor, "sample_rate": sample_rate}
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError(
+                                "DramaBox SRT processing interrupted by user"
+                            )
+
+                engine_instance = DramaBoxSRTWrapper(config)
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
+            elif engine_type == "fish_audio_s2":
+                processor_path = os.path.join(nodes_dir, "fish_audio_s2", "fish_audio_s2_srt_processor.py")
+                processor_spec = importlib.util.spec_from_file_location("fish_audio_s2_srt_processor_module", processor_path)
+                processor_module = importlib.util.module_from_spec(processor_spec)
+                processor_spec.loader.exec_module(processor_module)
+                FishAudioS2SRTProcessor = processor_module.FishAudioS2SRTProcessor
+
+                class FishAudioS2SRTWrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.processor = FishAudioS2SRTProcessor(self, self.config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.processor.update_config(new_config)
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError("Fish Audio S2 SRT processing interrupted by user")
+
+                engine_instance = FishAudioS2SRTWrapper(config)
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
+            elif engine_type == "omnivoice":
+                omnivoice_srt_processor_path = os.path.join(nodes_dir, "omnivoice", "omnivoice_srt_processor.py")
+                omnivoice_srt_spec = importlib.util.spec_from_file_location("omnivoice_srt_processor_module", omnivoice_srt_processor_path)
+                omnivoice_srt_module = importlib.util.module_from_spec(omnivoice_srt_spec)
+                omnivoice_srt_spec.loader.exec_module(omnivoice_srt_module)
+
+                OmniVoiceSRTProcessor = omnivoice_srt_module.OmniVoiceSRTProcessor
+
+                class OmniVoiceSRTWrapper:
+                    def __init__(self, config):
+                        self.config = config
+                        self.processor = OmniVoiceSRTProcessor(self, config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.processor.update_config(new_config)
+
+                    def process_with_error_handling(self, func):
+                        try:
+                            return func()
+                        except Exception as e:
+                            raise e
+
+                    def format_audio_output(self, audio_tensor, sample_rate):
+                        if audio_tensor.is_cuda:
+                            audio_tensor = audio_tensor.cpu()
+                        if audio_tensor.dim() == 1:
+                            audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
+                        elif audio_tensor.dim() == 2:
+                            audio_tensor = audio_tensor.unsqueeze(0)
+                        return {"waveform": audio_tensor, "sample_rate": sample_rate}
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError("OmniVoice SRT processing interrupted by user")
+
+                engine_instance = OmniVoiceSRTWrapper(config)
+
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
             elif engine_type == "vibevoice":
                 # Import and create the VibeVoice SRT processor using absolute import
                 vibevoice_srt_processor_path = os.path.join(nodes_dir, "vibevoice", "vibevoice_srt_processor.py")
@@ -677,10 +905,102 @@ Hello! This is unified SRT TTS with character switching.
                 }
                 return engine_instance
 
+            elif engine_type == "moss_tts":
+                moss_tts_srt_processor_path = os.path.join(nodes_dir, "moss_tts", "moss_tts_srt_processor.py")
+                moss_tts_srt_spec = importlib.util.spec_from_file_location("moss_tts_srt_processor_module", moss_tts_srt_processor_path)
+                moss_tts_srt_module = importlib.util.module_from_spec(moss_tts_srt_spec)
+                sys.modules["moss_tts_srt_processor_module"] = moss_tts_srt_module
+                moss_tts_srt_spec.loader.exec_module(moss_tts_srt_module)
+
+                MossTTSSRTProcessor = moss_tts_srt_module.MossTTSSRTProcessor
+
+                class MossTTSSRTWrapper:
+                    def __init__(self, config):
+                        self.config = config
+                        self.processor = MossTTSSRTProcessor(self, config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.processor.update_config(new_config)
+
+                    def process_with_error_handling(self, func):
+                        try:
+                            return func()
+                        except Exception as e:
+                            raise e
+
+                    def format_audio_output(self, audio_tensor, sample_rate):
+                        if audio_tensor.is_cuda:
+                            audio_tensor = audio_tensor.cpu()
+                        if audio_tensor.dim() == 1:
+                            audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
+                        elif audio_tensor.dim() == 2:
+                            audio_tensor = audio_tensor.unsqueeze(0)
+                        return {"waveform": audio_tensor, "sample_rate": sample_rate}
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError("MOSS-TTS SRT processing interrupted by user")
+
+                engine_instance = MossTTSSRTWrapper(config)
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
+            elif engine_type == "higgs_audio_v3":
+                higgs_audio_v3_srt_processor_path = os.path.join(nodes_dir, "higgs_audio_v3", "higgs_audio_v3_srt_processor.py")
+                higgs_audio_v3_srt_spec = importlib.util.spec_from_file_location("higgs_audio_v3_srt_processor_module", higgs_audio_v3_srt_processor_path)
+                higgs_audio_v3_srt_module = importlib.util.module_from_spec(higgs_audio_v3_srt_spec)
+                sys.modules["higgs_audio_v3_srt_processor_module"] = higgs_audio_v3_srt_module
+                higgs_audio_v3_srt_spec.loader.exec_module(higgs_audio_v3_srt_module)
+
+                HiggsAudioV3SRTProcessor = higgs_audio_v3_srt_module.HiggsAudioV3SRTProcessor
+
+                class HiggsAudioV3SRTWrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.processor = HiggsAudioV3SRTProcessor(self, cfg)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.processor.update_config(new_config)
+
+                    def process_with_error_handling(self, func):
+                        try:
+                            return func()
+                        except Exception as e:
+                            raise e
+
+                    def format_audio_output(self, audio_tensor, sample_rate):
+                        if audio_tensor.is_cuda:
+                            audio_tensor = audio_tensor.cpu()
+                        if audio_tensor.dim() == 1:
+                            audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
+                        elif audio_tensor.dim() == 2:
+                            audio_tensor = audio_tensor.unsqueeze(0)
+                        return {"waveform": audio_tensor, "sample_rate": sample_rate}
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError("Higgs Audio v3 SRT processing interrupted by user")
+
+                engine_instance = HiggsAudioV3SRTWrapper(config)
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
             else:
                 raise ValueError(f"Unknown engine type: {engine_type}")
                 
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
             print(f"❌ Failed to create engine SRT node instance: {e}")
             return None
 
@@ -743,7 +1063,10 @@ Hello! This is unified SRT TTS with character switching.
                     reference_text = ""  # No reference text available from direct audio
                     
                     print(f"📺 TTS SRT: Using direct audio input ({character_name})")
-                    print(f"⚠️ TTS SRT: Direct audio input has no reference text - F5-TTS engines will fail")
+                    print(
+                        "⚠️ TTS SRT: Direct audio input has no reference text - "
+                        "F5-TTS and OmniVoice cloning will fail"
+                    )
                     return None, audio_tensor, reference_text, character_name
             
             # Priority 2: narrator_voice dropdown (fallback)
@@ -769,6 +1092,8 @@ Hello! This is unified SRT TTS with character switching.
             return None, None, "", "narrator"
             
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
             print(f"❌ Voice reference error: {e}")
             return None, None, "", "narrator"
 
@@ -776,7 +1101,7 @@ Hello! This is unified SRT TTS with character switching.
                            seed: int, timing_mode: str, opt_narrator=None, enable_audio_cache: bool = True,
                            fade_for_StretchToFit: float = 0.01, max_stretch_ratio: float = 1.0,
                            min_stretch_ratio: float = 0.5, timing_tolerance: float = 2.0,
-                           batch_size: int = 0):
+                           batch_size: int = 0, use_native_duration_targeting: bool = False):
         """
         Generate SRT-timed speech using the selected TTS engine.
         This is a DELEGATION WRAPPER that preserves all original SRT functionality.
@@ -794,6 +1119,7 @@ Hello! This is unified SRT TTS with character switching.
             min_stretch_ratio: Minimum stretch ratio for smart_natural mode
             timing_tolerance: Timing tolerance for smart_natural mode
             batch_size: Number of parallel workers (0=sequential, 1+=streaming parallel)
+            use_native_duration_targeting: Inject subtitle durations into supported engines during generation
             
         Returns:
             Tuple of (audio_tensor, generation_info, timing_report, adjusted_srt)
@@ -821,7 +1147,31 @@ Hello! This is unified SRT TTS with character switching.
             if not engine_type:
                 raise ValueError("TTS engine missing engine_type")
 
+            if config.get("model_role") == "voice_design":
+                selected_model = config.get("model_variant") or config.get("model_name") or "selected model"
+                raise ValueError(
+                    f"'{selected_model}' is a voice-design model and cannot be used with TTS SRT. "
+                    "Connect this engine to Voice Designer, or select a standard TTS model in the engine node."
+                )
+            if config.get("model_role") == "sound_effects":
+                selected_model = config.get("model_variant") or config.get("model_name") or "selected model"
+                raise ValueError(
+                    f"'{selected_model}' generates sound effects and cannot be used with TTS SRT. "
+                    "Connect this engine to 🌩️ Sound Effects, or select a speech model in the engine node."
+                )
+
             print(f"📺 TTS SRT: Starting {engine_type} SRT generation")
+
+            native_duration_targeting_active = bool(
+                use_native_duration_targeting
+                and engine_type in {"omnivoice", "dramabox"}
+            )
+            if use_native_duration_targeting and not native_duration_targeting_active:
+                print(
+                    f"ℹ️ Native duration targeting is currently supported only for "
+                    f"OmniVoice and DramaBox in TTS SRT. "
+                    f"Ignoring it for engine '{engine_type}'."
+                )
             
             # Get voice reference (opt_narrator takes priority)
             audio_path, audio_tensor, reference_text, character_name = self._get_voice_reference(opt_narrator, narrator_voice)
@@ -831,6 +1181,11 @@ Hello! This is unified SRT TTS with character switching.
                 raise ValueError(
                     "F5-TTS requires reference text. When using direct audio input, "
                     "please use Character Voices node instead, which provides both audio and text."
+                )
+            if engine_type == "omnivoice" and (audio_tensor is not None or audio_path) and not reference_text.strip():
+                raise ValueError(
+                    "OmniVoice voice cloning requires reference text. "
+                    "Do not connect raw audio directly. Use Character Voices node or a narrator voice with a matching .reference.txt file."
                 )
             
             # Create proper engine SRT node instance to preserve ALL functionality
@@ -1007,6 +1362,108 @@ Hello! This is unified SRT TTS with character switching.
                     enable_audio_cache=enable_audio_cache
                 )
 
+            elif engine_type == "dots_tts":
+                timing_params = {
+                    'fade_for_StretchToFit': fade_for_StretchToFit,
+                    'max_stretch_ratio': max_stretch_ratio,
+                    'min_stretch_ratio': min_stretch_ratio,
+                    'timing_tolerance': timing_tolerance
+                }
+
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text if reference_text else "",
+                    }
+
+                result = engine_instance.processor.process_srt_content(
+                    srt_content=srt_content,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    timing_mode=timing_mode,
+                    timing_params=timing_params,
+                    enable_audio_cache=enable_audio_cache
+                )
+
+            elif engine_type == "dramabox":
+                timing_params = {
+                    'fade_for_StretchToFit': fade_for_StretchToFit,
+                    'max_stretch_ratio': max_stretch_ratio,
+                    'min_stretch_ratio': min_stretch_ratio,
+                    'timing_tolerance': timing_tolerance,
+                    'use_native_duration_targeting': native_duration_targeting_active,
+                }
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text or "",
+                    }
+                result = engine_instance.processor.process_srt_content(
+                    srt_content=srt_content,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    timing_mode=timing_mode,
+                    timing_params=timing_params,
+                    enable_audio_cache=enable_audio_cache,
+                )
+
+            elif engine_type == "fish_audio_s2":
+                print(
+                    f"   Audio cache: {'enabled' if enable_audio_cache else 'disabled'} "
+                    "(TTS SRT node)"
+                )
+                timing_params = {
+                    'fade_for_StretchToFit': fade_for_StretchToFit,
+                    'max_stretch_ratio': max_stretch_ratio,
+                    'min_stretch_ratio': min_stretch_ratio,
+                    'timing_tolerance': timing_tolerance
+                }
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text or "",
+                    }
+                result = engine_instance.processor.process_srt_content(
+                    srt_content=srt_content,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    timing_mode=timing_mode,
+                    timing_params=timing_params,
+                    enable_audio_cache=enable_audio_cache
+                )
+
+            elif engine_type == "omnivoice":
+                timing_params = {
+                    'fade_for_StretchToFit': fade_for_StretchToFit,
+                    'max_stretch_ratio': max_stretch_ratio,
+                    'min_stretch_ratio': min_stretch_ratio,
+                    'timing_tolerance': timing_tolerance,
+                    'use_native_duration_targeting': native_duration_targeting_active,
+                }
+
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text if reference_text else "",
+                    }
+
+                result = engine_instance.processor.process_srt_content(
+                    srt_content=srt_content,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    timing_mode=timing_mode,
+                    timing_params=timing_params,
+                    enable_audio_cache=enable_audio_cache
+                )
+
             elif engine_type == "vibevoice":
                 # Use the VibeVoice SRT processor from the wrapper instance
                 voice_mapping = {"narrator": audio_tensor} if audio_tensor else {}
@@ -1145,6 +1602,64 @@ Hello! This is unified SRT TTS with character switching.
                     timing_params=timing_params
                 )
 
+            elif engine_type == "moss_tts":
+                voice_mapping = {}
+                if audio_tensor:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text if reference_text else "",
+                    }
+                elif audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio_path': audio_path,
+                        'reference_text': reference_text if reference_text else "",
+                    }
+
+                timing_params = {
+                    'fade_for_StretchToFit': fade_for_StretchToFit,
+                    'max_stretch_ratio': max_stretch_ratio,
+                    'min_stretch_ratio': min_stretch_ratio,
+                    'timing_tolerance': timing_tolerance
+                }
+
+                result = engine_instance.processor.process_srt_content(
+                    srt_content=srt_content,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    timing_mode=timing_mode,
+                    timing_params=timing_params
+                )
+
+            elif engine_type == "higgs_audio_v3":
+                voice_mapping = {}
+                if audio_tensor:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text if reference_text else "",
+                    }
+                elif audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio_path': audio_path,
+                        'reference_text': reference_text if reference_text else "",
+                    }
+
+                timing_params = {
+                    'fade_for_StretchToFit': fade_for_StretchToFit,
+                    'max_stretch_ratio': max_stretch_ratio,
+                    'min_stretch_ratio': min_stretch_ratio,
+                    'timing_tolerance': timing_tolerance
+                }
+
+                result = engine_instance.processor.process_srt_content(
+                    srt_content=srt_content,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    timing_mode=timing_mode,
+                    timing_params=timing_params
+                )
+
             else:
                 raise ValueError(f"Unknown engine type: {engine_type}")
             
@@ -1179,8 +1694,15 @@ Hello! This is unified SRT TTS with character switching.
             return (audio_output, unified_info, timing_report, adjusted_srt)
                 
         except Exception as e:
-            # Bubble up pause tag + speaker KV incompatibility to trigger ComfyUI modal
-            if "Pause tags are not compatible with force_speaker_kv" in str(e):
+            # Bubble up hard incompatibilities so ComfyUI shows a modal error.
+            msg = str(e)
+            if (
+                "is a voice-design model and cannot be used with TTS SRT" in msg
+                or "Pause tags are not compatible with force_speaker_kv" in msg
+                or "MOSS-TTSD Native Multi-Speaker Dialogue does not support this SRT input" in msg
+            ):
+                raise
+            if isinstance(e, InterruptedError):
                 raise
             error_msg = f"❌ TTS SRT generation failed: {e}"
             print(error_msg)

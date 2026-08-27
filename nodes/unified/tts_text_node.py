@@ -34,7 +34,13 @@ BaseTTSNode = base_module.BaseTTSNode
 
 from utils.text.chunking import ImprovedChatterBoxChunker
 from utils.audio.processing import AudioProcessingUtils
-from utils.voice.discovery import get_available_voices, load_voice_reference, get_available_characters, get_character_mapping
+from utils.voice.discovery import (
+    get_available_voices,
+    load_voice_reference,
+    get_available_characters,
+    get_character_mapping,
+    voice_discovery,
+)
 from utils.text.character_parser import parse_character_text, character_parser
 from utils.voice.multilingual_engine import MultilingualEngine
 from utils.config_sanitizer import ConfigSanitizer
@@ -83,7 +89,7 @@ Back to the main narrator voice for the conclusion.""",
                 }),
                 "narrator_voice": (reference_files, {
                     "default": "none",
-                    "tooltip": "Fallback narrator voice from voice folders. Used when opt_narrator is not connected. Select 'none' if you only use opt_narrator input."
+                    "tooltip": "Fallback narrator voice from voice folders. Used when opt_narrator is not connected. Select 'none' for engines that support direct TTS without voice cloning, such as MOSS."
                 }),
                 "seed": ("INT", {
                     "default": 1, "min": 0, "max": 2**32 - 1,
@@ -176,7 +182,7 @@ Back to the main narrator voice for the conclusion.""",
                 stable_params['attention_mode'] = config.get('attention_mode', 'auto')
                 stable_params['quantize_llm_4bit'] = config.get('quantize_llm_4bit', False)
 
-            # For ChatterBox Official 23-Lang, include model_version in cache key since v1/v2 are different models
+            # ChatterBox multilingual T3 versions are distinct checkpoints.
             if engine_type == "chatterbox_official_23lang":
                 stable_params['model_version'] = config.get('model_version', 'v1')
 
@@ -184,22 +190,76 @@ Back to the main narrator voice for the conclusion.""",
             if engine_type == "step_audio_editx":
                 stable_params['quantization'] = config.get('quantization', 'none')
                 stable_params['torch_dtype'] = config.get('torch_dtype', 'bfloat16')
+                stable_params['runtime_mode'] = config.get('runtime_mode', 'shared_runtime')
+                stable_params['runtime_profile'] = config.get('runtime_profile')
 
-            # For Qwen3-TTS, include voice_preset, instruct, model_size, attn_implementation,
-            # and optimization settings since they determine model type and require model reload
+            # Qwen checkpoints can share a size while serving different roles, so cache
+            # by the explicit checkpoint identity rather than inferring it from the preset.
             if engine_type == "qwen3_tts":
+                stable_params['model_name'] = config.get('model_name')
+                stable_params['model_path'] = config.get('model_path')
+                stable_params['model_type'] = config.get('model_type')
                 stable_params['voice_preset'] = config.get('voice_preset', 'None (Zero-shot / Custom)')
                 stable_params['instruct'] = config.get('instruct', '')
                 stable_params['model_size'] = config.get('model_size', '1.7B')
+                stable_params['dtype'] = config.get('dtype', 'auto')
                 stable_params['attn_implementation'] = config.get('attn_implementation', 'auto')
+                stable_params['runtime_mode'] = config.get('runtime_mode')
+                stable_params['runtime_profile'] = config.get('runtime_profile')
                 # CRITICAL: Include optimization settings - changing these requires model reload
                 # Without this, enabling torch.compile/cuda_graphs would reuse the non-compiled model
                 stable_params['use_torch_compile'] = config.get('use_torch_compile', False)
                 stable_params['use_cuda_graphs'] = config.get('use_cuda_graphs', False)
                 stable_params['compile_mode'] = config.get('compile_mode', 'default')
 
-            # For IndexTTS-2, include low_vram in cache key since it requires model reload
+            if engine_type == "dots_tts":
+                stable_params['model_variant'] = config.get('model_variant', 'dots.tts-soar')
+                stable_params['precision'] = config.get('precision', 'auto')
+                stable_params['optimize'] = config.get('optimize', False)
+                stable_params['max_generate_length'] = config.get('max_generate_length', 500)
+
+            if engine_type == "dramabox":
+                stable_params['model_name'] = config.get('model_name', 'DramaBox')
+                stable_params['precision'] = config.get('precision', 'auto')
+                stable_params['memory_mode'] = config.get('memory_mode', 'fast')
+                stable_params['transformer_quantization'] = config.get('transformer_quantization', 'none')
+                stable_params['compile_model'] = config.get('compile_model', False)
+
+            if engine_type == "fish_audio_s2":
+                stable_params['model_variant'] = config.get('model_variant', 's2-pro')
+                stable_params['precision'] = config.get('precision', 'bfloat16')
+                stable_params['compile'] = config.get('compile', False)
+                stable_params['quantization'] = config.get('quantization', 'none')
+                stable_params['multi_speaker_mode'] = config.get('multi_speaker_mode', 'Native Multi-Speaker')
+                stable_params['language_prompting'] = config.get('language_prompting', 'Auto Inline Tag')
+
+            if engine_type == "omnivoice":
+                stable_params['model_variant'] = config.get('model_variant', 'OmniVoice')
+                stable_params['dtype'] = config.get('dtype', 'auto')
+
+            # For MOSS-TTS, include model identity and load-time options.
+            if engine_type == "moss_tts":
+                stable_params['model_variant'] = config.get('model_variant', 'MOSS-TTS-Local-Transformer')
+                stable_params['multi_speaker_mode'] = config.get('multi_speaker_mode', 'Custom Character Switching')
+                stable_params['dtype'] = config.get('dtype', 'auto')
+                stable_params['attn_implementation'] = config.get('attn_implementation', 'auto')
+                stable_params['codec_model'] = config.get('codec_model', 'MOSS-Audio-Tokenizer')
+
+            if engine_type == "higgs_audio_v3":
+                stable_params['model'] = config.get('model', 'higgs-audio-v3-tts-4b')
+                stable_params['dtype'] = config.get('dtype', 'auto')
+                stable_params['attention'] = config.get('attention', 'auto')
+
+            # IndexTTS 2.0 and 2.5 are distinct checkpoints/backends. Every
+            # load-time option must participate in the processor cache key or
+            # changing the engine node can silently keep the old adapter alive.
             if engine_type == "index_tts":
+                stable_params['model_path'] = config.get('model_path', 'IndexTTS-2')
+                stable_params['use_fp16'] = config.get('use_fp16', True)
+                stable_params['use_cuda_kernel'] = config.get('use_cuda_kernel')
+                stable_params['use_deepspeed'] = config.get('use_deepspeed', False)
+                stable_params['use_torch_compile'] = config.get('use_torch_compile', False)
+                stable_params['use_accel'] = config.get('use_accel', False)
                 stable_params['low_vram'] = config.get('low_vram', False)
 
             # For CosyVoice, include actual model identity and load options in cache key.
@@ -393,6 +453,8 @@ Back to the main narrator voice for the conclusion.""",
                                         voice_mapping[char] = {"waveform": waveform, "sample_rate": sample_rate}
                                         print(f"🎭 VibeVoice: Using character-specific voice for '{char}'")
                                     except Exception as e:
+                                        if isinstance(e, InterruptedError):
+                                            raise
                                         print(f"⚠️ Failed to load character audio for '{char}': {e}")
                                         voice_mapping[char] = char_audio  # Fallback to main voice
                                         print(f"🔄 VibeVoice: Using main voice fallback for '{char}'")
@@ -496,6 +558,126 @@ Back to the main narrator voice for the conclusion.""",
 
                 return engine_instance
 
+            elif engine_type == "dots_tts":
+                from engines.adapters.dots_tts_adapter import DotsTTSEngineAdapter
+                dots_tts_processor_path = os.path.join(nodes_dir, "dots_tts", "dots_tts_processor.py")
+                dots_tts_processor_spec = importlib.util.spec_from_file_location("dots_tts_processor_module", dots_tts_processor_path)
+                dots_tts_processor_module = importlib.util.module_from_spec(dots_tts_processor_spec)
+                dots_tts_processor_spec.loader.exec_module(dots_tts_processor_module)
+
+                DotsTTSProcessor = dots_tts_processor_module.DotsTTSProcessor
+
+                class DotsTTSWrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.adapter = DotsTTSEngineAdapter(self.config)
+                        self.processor = DotsTTSProcessor(self.adapter, self.config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.adapter.update_config(new_config)
+                        self.processor.update_config(new_config)
+
+                engine_instance = DotsTTSWrapper(config)
+
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+
+                return engine_instance
+
+            elif engine_type == "dramabox":
+                from engines.adapters.dramabox_adapter import DramaBoxEngineAdapter
+                processor_path = os.path.join(nodes_dir, "dramabox", "dramabox_processor.py")
+                processor_spec = importlib.util.spec_from_file_location(
+                    "dramabox_processor_module", processor_path
+                )
+                processor_module = importlib.util.module_from_spec(processor_spec)
+                processor_spec.loader.exec_module(processor_module)
+                DramaBoxProcessor = processor_module.DramaBoxProcessor
+
+                class DramaBoxWrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.adapter = DramaBoxEngineAdapter(self.config)
+                        self.processor = DramaBoxProcessor(self.adapter, self.config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.adapter.update_config(new_config)
+                        self.processor.update_config(new_config)
+
+                engine_instance = DramaBoxWrapper(config)
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
+            elif engine_type == "fish_audio_s2":
+                from engines.adapters.fish_audio_s2_adapter import FishAudioS2Adapter
+                processor_path = os.path.join(nodes_dir, "fish_audio_s2", "fish_audio_s2_processor.py")
+                processor_spec = importlib.util.spec_from_file_location("fish_audio_s2_processor_module", processor_path)
+                processor_module = importlib.util.module_from_spec(processor_spec)
+                processor_spec.loader.exec_module(processor_module)
+                FishAudioS2Processor = processor_module.FishAudioS2Processor
+
+                class FishAudioS2Wrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.adapter = FishAudioS2Adapter(self.config)
+                        self.processor = FishAudioS2Processor(self.adapter, self.config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.adapter.update_config(new_config)
+                        self.processor.update_config(new_config)
+
+                engine_instance = FishAudioS2Wrapper(config)
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+                return engine_instance
+
+            elif engine_type == "omnivoice":
+                from engines.adapters.omnivoice_adapter import OmniVoiceEngineAdapter
+                omnivoice_processor_path = os.path.join(nodes_dir, "omnivoice", "omnivoice_processor.py")
+                omnivoice_processor_spec = importlib.util.spec_from_file_location("omnivoice_processor_module", omnivoice_processor_path)
+                omnivoice_processor_module = importlib.util.module_from_spec(omnivoice_processor_spec)
+                omnivoice_processor_spec.loader.exec_module(omnivoice_processor_module)
+
+                OmniVoiceProcessor = omnivoice_processor_module.OmniVoiceProcessor
+
+                class OmniVoiceWrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.adapter = OmniVoiceEngineAdapter(self.config)
+                        self.processor = OmniVoiceProcessor(self.adapter, self.config)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.adapter.update_config(new_config)
+                        self.processor.update_config(new_config)
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError("OmniVoice processing interrupted by user")
+
+                engine_instance = OmniVoiceWrapper(config)
+
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+
+                return engine_instance
+
             elif engine_type == "qwen3_tts":
                 # Create Qwen3-TTS processor instance
                 # Use global nodes_dir (already defined at module level)
@@ -508,6 +690,54 @@ Back to the main narrator voice for the conclusion.""",
                 engine_instance = Qwen3TTSProcessor(self, config)
 
                 # Cache the instance with timestamp
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+
+                return engine_instance
+
+            elif engine_type == "moss_tts":
+                moss_processor_path = os.path.join(nodes_dir, "moss_tts", "moss_tts_processor.py")
+                moss_processor_spec = importlib.util.spec_from_file_location("moss_tts_processor_module", moss_processor_path)
+                moss_processor_module = importlib.util.module_from_spec(moss_processor_spec)
+                moss_processor_spec.loader.exec_module(moss_processor_module)
+
+                MossTTSProcessor = moss_processor_module.MossTTSProcessor
+                engine_instance = MossTTSProcessor(self, config)
+
+                import time
+                self._cached_engine_instances[cache_key] = {
+                    'instance': engine_instance,
+                    'timestamp': time.time()
+                }
+
+                return engine_instance
+
+            elif engine_type == "higgs_audio_v3":
+                higgs_v3_processor_path = os.path.join(nodes_dir, "higgs_audio_v3", "higgs_audio_v3_processor.py")
+                higgs_v3_processor_spec = importlib.util.spec_from_file_location("higgs_audio_v3_processor_module", higgs_v3_processor_path)
+                higgs_v3_processor_module = importlib.util.module_from_spec(higgs_v3_processor_spec)
+                higgs_v3_processor_spec.loader.exec_module(higgs_v3_processor_module)
+
+                HiggsAudioV3Processor = higgs_v3_processor_module.HiggsAudioV3Processor
+
+                class HiggsAudioV3Wrapper:
+                    def __init__(self, cfg):
+                        self.config = cfg.copy()
+                        self.processor = HiggsAudioV3Processor(self, cfg)
+
+                    def update_config(self, new_config):
+                        self.config = new_config.copy()
+                        self.processor.update_config(new_config)
+
+                    def check_interrupt(self):
+                        if model_management.interrupt_processing:
+                            raise InterruptedError("Higgs Audio v3 processing interrupted by user")
+
+                engine_instance = HiggsAudioV3Wrapper(config)
+
                 import time
                 self._cached_engine_instances[cache_key] = {
                     'instance': engine_instance,
@@ -615,6 +845,10 @@ Back to the main narrator voice for the conclusion.""",
                 raise ValueError(f"Unknown engine type: {engine_type}")
                 
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
+            if "MOSS LoRA/base model mismatch" in str(e):
+                raise
             print(f"❌ Failed to create engine node instance: {e}")
             return None
 
@@ -665,7 +899,7 @@ Back to the main narrator voice for the conclusion.""",
                     audio_path = opt_narrator.get("audio_path") 
                     reference_text = opt_narrator.get("reference_text", "")
                     character_name = opt_narrator.get("character_name", "narrator")
-                    
+
                     print(f"🎤 TTS Text: Using voice reference from Character Voices node ({character_name})")
                     # print(f"🐛 TTS_TEXT: Character Voices - character_name='{character_name}', has_audio={audio is not None}")
                     return audio_path, audio, reference_text, character_name
@@ -678,7 +912,10 @@ Back to the main narrator voice for the conclusion.""",
                     reference_text = ""  # No reference text available from direct audio
 
                     print(f"🎤 TTS Text: Using direct audio input ({character_name})")
-                    print(f"⚠️ TTS Text: Direct audio input has no reference text - F5-TTS will fail, Qwen3-TTS will use x_vector_only mode (lower quality)")
+                    print(
+                        "⚠️ TTS Text: Direct audio input has no reference text - "
+                        "F5-TTS and OmniVoice cloning will fail, Qwen3-TTS will use x_vector_only mode (lower quality)"
+                    )
                     return None, audio_tensor, reference_text, character_name
             
             # Priority 2: narrator_voice dropdown (fallback)
@@ -723,6 +960,8 @@ Back to the main narrator voice for the conclusion.""",
             return None, None, "", "narrator"
             
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
             print(f"❌ Voice reference error: {e}")
             return None, None, "", "narrator"
 
@@ -771,6 +1010,19 @@ Back to the main narrator voice for the conclusion.""",
             
             if not engine_type:
                 raise ValueError("TTS engine missing engine_type")
+
+            if config.get("model_role") == "voice_design":
+                selected_model = config.get("model_variant") or config.get("model_name") or "selected model"
+                raise ValueError(
+                    f"'{selected_model}' is a voice-design model and cannot be used with TTS Text. "
+                    "Connect this engine to Voice Designer, or select a standard TTS model in the engine node."
+                )
+            if config.get("model_role") == "sound_effects":
+                selected_model = config.get("model_variant") or config.get("model_name") or "selected model"
+                raise ValueError(
+                    f"'{selected_model}' generates sound effects and cannot be used with TTS Text. "
+                    "Connect this engine to 🌩️ Sound Effects, or select a speech model in the engine node."
+                )
             
             # Get voice reference (opt_narrator takes priority)
             audio_path, audio_tensor, reference_text, character_name = self._get_voice_reference(opt_narrator, narrator_voice)
@@ -782,9 +1034,14 @@ Back to the main narrator voice for the conclusion.""",
             if language.startswith("local:"):
                 # For local models, show "local" as the language code
                 lang_code = "local"
+            elif language.lower() == "auto":
+                lang_code = "auto"
+            elif language.lower() == "none":
+                lang_code = "none"
             else:
-                # Standard language codes - take first 2 chars
-                lang_code = language.lower()[:2]  # en, fr, de, etc.
+                # Keep free-form language names readable instead of producing
+                # misleading abbreviations such as "po" for Portuguese.
+                lang_code = language
             
             char_display = character_name if character_name else "default"
 
@@ -804,6 +1061,11 @@ Back to the main narrator voice for the conclusion.""",
                 raise ValueError(
                     "F5-TTS requires reference text. When using direct audio input, "
                     "please use Character Voices node instead, which provides both audio and text."
+                )
+            if engine_type == "omnivoice" and (audio_tensor is not None or audio_path) and not reference_text.strip():
+                raise ValueError(
+                    "OmniVoice voice cloning requires reference text. "
+                    "Do not connect raw audio directly. Use Character Voices node or a narrator voice with a matching .reference.txt file."
                 )
             
             # Create proper engine node instance to preserve ALL functionality
@@ -945,8 +1207,6 @@ Back to the main narrator voice for the conclusion.""",
                 tts_processor = StepAudioEditXProcessor(wrapper_instance, config)
 
                 # Prepare voice mapping - discover all characters in text
-                from utils.text.character_parser import character_parser
-                from utils.voice.discovery import get_character_mapping
                 import tempfile
 
                 # Parse characters from text - first extract character names from tags
@@ -956,7 +1216,7 @@ Back to the main narrator voice for the conclusion.""",
                 # Filter out pause tags and get unique characters
                 characters_from_tags = []
                 for tag in character_tags:
-                    if not tag.startswith('pause:'):
+                    if not tag.lower().startswith(('pause:', 'wait:', 'stop:')):
                         # Extract character name (before | for parameters)
                         character_name = tag.split('|')[0].strip()
                         characters_from_tags.append(character_name)
@@ -966,8 +1226,6 @@ Back to the main narrator voice for the conclusion.""",
 
                 # Set available characters so parser doesn't change them to "narrator"
                 # Also get character aliases and language defaults like IndexTTS does
-                from utils.voice.discovery import get_available_characters, voice_discovery
-
                 # Get available characters and aliases
                 available_chars = get_available_characters()
                 character_aliases = voice_discovery.get_character_aliases()
@@ -1026,7 +1284,9 @@ Back to the main narrator voice for the conclusion.""",
                         temp_file_path = AudioProcessingUtils.save_audio_to_temp_file(waveform, sr)
                         voice_mapping[character] = {
                             'prompt_audio_path': temp_file_path,
-                            'prompt_text': reference_text
+                            'prompt_text': reference_text,
+                            # Preserve the user-facing voice name for progress output.
+                            'character_name': character_name,
                         }
                     else:
                         # Use character-specific voice from voices/ folder with fallback to narrator
@@ -1034,7 +1294,8 @@ Back to the main narrator voice for the conclusion.""",
                         if audio_path and ref_text:
                             voice_mapping[character] = {
                                 'prompt_audio_path': audio_path,
-                                'prompt_text': ref_text
+                                'prompt_text': ref_text,
+                                'character_name': character,
                             }
                             print(f"🎭 Step Audio EditX: Using character-specific voice for '{character}'")
                         else:
@@ -1058,7 +1319,8 @@ Back to the main narrator voice for the conclusion.""",
                                 temp_file_path = AudioProcessingUtils.save_audio_to_temp_file(waveform, sr)
                                 voice_mapping[character] = {
                                     'prompt_audio_path': temp_file_path,
-                                    'prompt_text': reference_text
+                                    'prompt_text': reference_text,
+                                    'character_name': character_name,
                                 }
                                 print(f"🔄 Step Audio EditX: Using narrator voice fallback for '{character}'")
                             else:
@@ -1215,7 +1477,336 @@ Back to the main narrator voice for the conclusion.""",
 
                 formatted_audio = AudioProcessingUtils.format_for_comfyui(combined_audio, 44100)
                 result = (formatted_audio, generation_info)
-                
+
+            elif engine_type == "dots_tts":
+                import re
+                from utils.audio.chunk_timing import ChunkTimingHelper
+
+                if not hasattr(engine_instance, "processor"):
+                    dots_tts_processor_path = os.path.join(nodes_dir, "dots_tts", "dots_tts_processor.py")
+                    dots_tts_processor_spec = importlib.util.spec_from_file_location("dots_tts_processor_module", dots_tts_processor_path)
+                    dots_tts_processor_module = importlib.util.module_from_spec(dots_tts_processor_spec)
+                    dots_tts_processor_spec.loader.exec_module(dots_tts_processor_module)
+                    DotsTTSProcessor = dots_tts_processor_module.DotsTTSProcessor
+                    engine_instance.processor = DotsTTSProcessor(engine_instance.adapter, config)
+                    engine_instance.processor.update_config(config)
+
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text or '',
+                    }
+
+                segment_records = engine_instance.processor.process_text(
+                    text=text,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    enable_chunking=enable_chunking,
+                    max_chars_per_chunk=max_chars_per_chunk,
+                    chunk_combination_method=chunk_combination_method,
+                    silence_between_chunks_ms=silence_between_chunks_ms,
+                    enable_audio_cache=enable_audio_cache
+                )
+
+                combined_audio, chunk_info = engine_instance.processor.combine_audio_segments(
+                    segments=segment_records,
+                    method=chunk_combination_method,
+                    silence_ms=silence_between_chunks_ms,
+                    original_text=text,
+                    return_info=True
+                )
+
+                total_duration = combined_audio.shape[-1] / 48000.0 if combined_audio.numel() else 0.0
+                clean_text = re.sub(r'\[.*?\]', '', text)
+                text_length = len(clean_text)
+                base_info = f"Generated {total_duration:.1f}s audio from {text_length} characters (Dots TTS, narrator: {char_display})"
+                base_info += "\n🎭 Character switching and pause tags enabled"
+                generation_info = ChunkTimingHelper.enhance_generation_info(f"✅ {base_info}", chunk_info)
+
+                formatted_audio = AudioProcessingUtils.format_for_comfyui(combined_audio, 48000)
+                result = (formatted_audio, generation_info)
+
+            elif engine_type == "dramabox":
+                import re
+                from utils.audio.chunk_timing import ChunkTimingHelper
+
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text or '',
+                    }
+
+                segment_records = engine_instance.processor.process_text(
+                    text=text,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    enable_chunking=enable_chunking,
+                    max_chars_per_chunk=max_chars_per_chunk,
+                    chunk_combination_method=chunk_combination_method,
+                    silence_between_chunks_ms=silence_between_chunks_ms,
+                    enable_audio_cache=enable_audio_cache,
+                )
+                combined_audio, chunk_info = engine_instance.processor.combine_audio_segments(
+                    segments=segment_records,
+                    method=chunk_combination_method,
+                    silence_ms=silence_between_chunks_ms,
+                    original_text=text,
+                    return_info=True,
+                )
+
+                total_duration = combined_audio.shape[-1] / 48000.0 if combined_audio.numel() else 0.0
+                clean_text = re.sub(r'\[.*?\]', '', text)
+                base_info = (
+                    f"Generated {total_duration:.1f}s audio from {len(clean_text)} characters "
+                    f"(DramaBox, narrator: {char_display})"
+                )
+                base_info += "\n🎭 Native expressive prompts, character switching, and pause tags enabled"
+                near_silent_records = [
+                    record
+                    for record in segment_records
+                    if record.get("generation_status", {}).get("near_silent")
+                ]
+                if near_silent_records:
+                    base_info += (
+                        f"\n\n⚠️ DramaBox detected {len(near_silent_records)} "
+                        "near-silent generated segment(s)."
+                    )
+                    for record in near_silent_records:
+                        status = record["generation_status"]
+                        base_info += (
+                            f"\n⚠️ {status.get('character', record.get('character', 'narrator'))}: "
+                            "adjust generation/reference duration, reference audio, "
+                            "guidance settings, or seed for that segment "
+                            f"(RMS {status.get('rms_dbfs', -120.0):.1f} dBFS)."
+                        )
+                generation_info = ChunkTimingHelper.enhance_generation_info(
+                    f"✅ {base_info}", chunk_info
+                )
+                formatted_audio = AudioProcessingUtils.format_for_comfyui(
+                    combined_audio, 48000
+                )
+                result = (formatted_audio, generation_info)
+
+            elif engine_type == "fish_audio_s2":
+                import re
+                from utils.audio.chunk_timing import ChunkTimingHelper
+
+                print(
+                    f"   Audio cache: {'enabled' if enable_audio_cache else 'disabled'} "
+                    "(TTS Text node)"
+                )
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text or '',
+                    }
+
+                segment_records = engine_instance.processor.process_text(
+                    text=text,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    enable_chunking=enable_chunking,
+                    max_chars_per_chunk=max_chars_per_chunk,
+                    chunk_combination_method=chunk_combination_method,
+                    silence_between_chunks_ms=silence_between_chunks_ms,
+                    enable_audio_cache=enable_audio_cache
+                )
+                combined_audio, chunk_info = engine_instance.processor.combine_audio_segments(
+                    segments=segment_records,
+                    method=chunk_combination_method,
+                    silence_ms=silence_between_chunks_ms,
+                    original_text=text,
+                    return_info=True
+                )
+                total_duration = combined_audio.shape[-1] / 44100.0 if combined_audio.numel() else 0.0
+                clean_text = re.sub(r'\[.*?\]', '', text)
+                base_info = (
+                    f"Generated {total_duration:.1f}s audio from {len(clean_text)} characters "
+                    f"(Fish Audio S2 Pro, narrator: {char_display})"
+                )
+                base_info += "\n🎭 Character switching, pause tags, and Fish inline tags enabled"
+                generation_info = ChunkTimingHelper.enhance_generation_info(f"✅ {base_info}", chunk_info)
+                result = (AudioProcessingUtils.format_for_comfyui(combined_audio, 44100), generation_info)
+
+            elif engine_type == "omnivoice":
+                import re
+                from utils.audio.chunk_timing import ChunkTimingHelper
+
+                if not hasattr(engine_instance, "processor"):
+                    omnivoice_processor_path = os.path.join(nodes_dir, "omnivoice", "omnivoice_processor.py")
+                    omnivoice_processor_spec = importlib.util.spec_from_file_location("omnivoice_processor_module", omnivoice_processor_path)
+                    omnivoice_processor_module = importlib.util.module_from_spec(omnivoice_processor_spec)
+                    omnivoice_processor_spec.loader.exec_module(omnivoice_processor_module)
+                    OmniVoiceProcessor = omnivoice_processor_module.OmniVoiceProcessor
+                    engine_instance.processor = OmniVoiceProcessor(engine_instance.adapter, config)
+                    engine_instance.processor.update_config(config)
+
+                voice_mapping = {}
+                if audio_tensor is not None or audio_path:
+                    voice_mapping['narrator'] = {
+                        'audio': audio_tensor,
+                        'audio_path': audio_path,
+                        'reference_text': reference_text or '',
+                    }
+
+                segment_records = engine_instance.processor.process_text(
+                    text=text,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    enable_chunking=enable_chunking,
+                    max_chars_per_chunk=max_chars_per_chunk,
+                    chunk_combination_method=chunk_combination_method,
+                    silence_between_chunks_ms=silence_between_chunks_ms,
+                    enable_audio_cache=enable_audio_cache
+                )
+
+                combined_audio, chunk_info = engine_instance.processor.combine_audio_segments(
+                    segments=segment_records,
+                    method=chunk_combination_method,
+                    silence_ms=silence_between_chunks_ms,
+                    original_text=text,
+                    return_info=True
+                )
+
+                total_duration = combined_audio.shape[-1] / 24000.0 if combined_audio.numel() else 0.0
+                clean_text = re.sub(r'\[.*?\]', '', text)
+                text_length = len(clean_text)
+
+                base_info = f"Generated {total_duration:.1f}s audio from {text_length} characters (OmniVoice, narrator: {char_display})"
+                base_info += "\n🎭 Character switching, pause tags, voice design, and native long-form chunking enabled"
+                generation_info = ChunkTimingHelper.enhance_generation_info(f"✅ {base_info}", chunk_info)
+
+                formatted_audio = AudioProcessingUtils.format_for_comfyui(combined_audio, 24000)
+                result = (formatted_audio, generation_info)
+
+            elif engine_type == "moss_tts":
+                import re
+                from utils.audio.chunk_timing import ChunkTimingHelper
+
+                voice_mapping = engine_instance.build_voice_mapping(
+                    text=text,
+                    narrator_audio=audio_tensor,
+                    reference_text=reference_text or "",
+                    narrator_audio_path=audio_path,
+                )
+
+                audio_segments = engine_instance.process_text(
+                    text=text,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    enable_chunking=enable_chunking,
+                    max_chars_per_chunk=max_chars_per_chunk,
+                )
+
+                audio_result, chunk_info = engine_instance.combine_audio_segments(
+                    segments=audio_segments,
+                    method=chunk_combination_method,
+                    silence_ms=silence_between_chunks_ms,
+                    text_length=len(text),
+                    return_info=True,
+                )
+
+                total_duration = audio_result.shape[-1] / 24000.0 if audio_result.numel() else 0.0
+                clean_text = re.sub(r'\[.*?\]', '', text)
+                text_length = len(clean_text)
+                model_variant = config.get('model_variant', 'MOSS-TTS-Local-Transformer')
+                lora_adapter = config.get('lora_adapter')
+                lora_info = ""
+                if lora_adapter:
+                    lora_name = os.path.basename(str(lora_adapter).rstrip("/\\"))
+                    lora_info = f", LoRA: {lora_name}"
+                base_info = (
+                    f"Generated {total_duration:.1f}s audio from {text_length} characters "
+                    f"(MOSS-TTS {model_variant}{lora_info}, narrator: {char_display})"
+                )
+                base_info += "\n🎭 Character switching, pause tags, and official duration-token hint supported"
+                generation_info = ChunkTimingHelper.enhance_generation_info(f"✅ {base_info}", chunk_info)
+                formatted_audio = AudioProcessingUtils.format_for_comfyui(audio_result, 24000)
+                result = (formatted_audio, generation_info)
+
+            elif engine_type == "higgs_audio_v3":
+                import re
+                from utils.audio.chunk_timing import ChunkTimingHelper
+
+                character_tags = re.findall(r'\[([^\]]+)\]', text)
+                tagged_characters = []
+                for tag in character_tags:
+                    if not tag.lower().startswith(('pause:', 'wait:', 'stop:')):
+                        tagged_characters.append(tag.split('|')[0].strip().lower())
+
+                available_chars = get_available_characters()
+                character_aliases = voice_discovery.get_character_aliases()
+                all_available = {"narrator"}
+                if available_chars:
+                    all_available.update(available_chars)
+                for alias, target in character_aliases.items():
+                    all_available.add(alias.lower())
+                    all_available.add(target.lower())
+                all_available.update(tagged_characters)
+
+                character_parser.set_available_characters(list(all_available))
+                character_parser.reset_session_cache()
+                segment_objects = character_parser.parse_text_segments(text)
+                characters = list(set([seg.character for seg in segment_objects]))
+                character_mapping = get_character_mapping(characters, engine_type="higgs_audio_v3")
+
+                voice_mapping = {}
+                for character in characters:
+                    if character == "narrator" and audio_tensor is not None:
+                        voice_mapping[character] = {
+                            "audio": audio_tensor,
+                            "audio_path": audio_path,
+                            "reference_text": reference_text or "",
+                        }
+                        continue
+
+                    char_audio_path, char_ref_text = character_mapping.get(character, (None, None))
+                    if char_audio_path:
+                        voice_mapping[character] = {
+                            "audio_path": char_audio_path,
+                            "reference_text": char_ref_text or "",
+                        }
+                    elif audio_tensor is not None:
+                        voice_mapping[character] = {
+                            "audio": audio_tensor,
+                            "audio_path": audio_path,
+                            "reference_text": reference_text or "",
+                        }
+
+                audio_segments = engine_instance.processor.process_text(
+                    text=text,
+                    voice_mapping=voice_mapping,
+                    seed=seed,
+                    enable_chunking=enable_chunking,
+                    max_chars_per_chunk=max_chars_per_chunk,
+                )
+
+                audio_result, chunk_info = engine_instance.processor.combine_audio_segments(
+                    segments=audio_segments,
+                    method=chunk_combination_method,
+                    silence_ms=silence_between_chunks_ms,
+                    text_length=len(text),
+                    return_info=True,
+                )
+
+                total_duration = audio_result.shape[-1] / 24000.0 if audio_result.numel() else 0.0
+                clean_text = re.sub(r'\[.*?\]', '', text)
+                text_length = len(clean_text)
+                base_info = (
+                    f"Generated {total_duration:.1f}s audio from {text_length} characters "
+                    f"(Higgs Audio v3, narrator: {char_display})"
+                )
+                base_info += "\n🎭 Character switching, pause tags, and native <|...|> inline controls supported"
+                generation_info = ChunkTimingHelper.enhance_generation_info(f"✅ {base_info}", chunk_info)
+                formatted_audio = AudioProcessingUtils.format_for_comfyui(audio_result, 24000)
+                result = (formatted_audio, generation_info)
+
             elif engine_type == "qwen3_tts":
                 # Qwen3-TTS uses processor pattern - call through processor
                 # Extract characters from text first
@@ -1223,14 +1814,11 @@ Back to the main narrator voice for the conclusion.""",
                 character_tags = re.findall(r'\[([^\]]+)\]', text)
                 characters_from_tags = []
                 for tag in character_tags:
-                    if not tag.startswith('pause:'):
+                    if not tag.lower().startswith(('pause:', 'wait:', 'stop:')):
                         character_name = tag.split('|')[0].strip().lower()
                         characters_from_tags.append(character_name)
 
                 # Parse segments to get actual characters used
-                from utils.text.character_parser import character_parser
-                from utils.voice.discovery import voice_discovery, get_available_characters
-
                 # Get available characters
                 available_chars = get_available_characters()
                 character_aliases = voice_discovery.get_character_aliases()
@@ -1264,7 +1852,6 @@ Back to the main narrator voice for the conclusion.""",
                 characters = list(set([seg.character for seg in segment_objects]))
 
                 # Get character voice mapping
-                from utils.voice.discovery import get_character_mapping
                 character_mapping = get_character_mapping(characters, engine_type="qwen3_tts")
 
                 # Build voice mapping for character switching
@@ -1321,6 +1908,8 @@ Back to the main narrator voice for the conclusion.""",
                                 }
                                 print(f"🎭 Qwen3-TTS: Using character-specific voice for '{character}' (ICL mode)")
                             except Exception as e:
+                                if isinstance(e, InterruptedError):
+                                    raise
                                 print(f"⚠️ Failed to load character audio for '{character}': {e}")
                                 # Fallback to narrator voice if available
                                 if audio_tensor is not None and reference_text:
@@ -1364,6 +1953,8 @@ Back to the main narrator voice for the conclusion.""",
                                 print(f"⚠️⚠️ Qwen3-TTS: Character '{character}' has audio but NO reference text")
                                 print(f"⚠️⚠️ Using x_vector_only mode (speaker embedding only) - LOWER QUALITY than ICL mode")
                             except Exception as e:
+                                if isinstance(e, InterruptedError):
+                                    raise
                                 print(f"⚠️ Failed to load character audio for '{character}': {e}")
                                 # Fallback to narrator voice if available
                                 if audio_tensor is not None:
@@ -1493,9 +2084,15 @@ Back to the main narrator voice for the conclusion.""",
                 
         except Exception as e:
             # Bubble up pause tag + speaker KV incompatibility to trigger ComfyUI modal
+            if "is a voice-design model and cannot be used with TTS Text" in str(e):
+                raise
             if "Pause tags are not compatible with force_speaker_kv" in str(e):
                 raise
+            if "MOSS LoRA/base model mismatch" in str(e):
+                raise
             if engine_type == "index_tts":
+                raise
+            if isinstance(e, InterruptedError):
                 raise
             error_msg = f"❌ TTS Text generation failed: {e}"
             print(error_msg)

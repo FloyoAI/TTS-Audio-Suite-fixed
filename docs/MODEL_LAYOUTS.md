@@ -203,6 +203,57 @@ Notes:
 
 - Main model, tokenizer assets, and speech stack auto-download.
 
+## Higgs Audio v3
+
+```text
+ComfyUI/models/TTS/higgs_audio_v3/
+└── higgs-audio-v3-tts-4b/
+    ├── config.json
+    ├── tokenizer.json
+    ├── tokenizer_config.json
+    ├── chat_template.jinja
+    ├── model.safetensors
+    ├── model.safetensors.index.json
+    └── LICENSE
+```
+
+Notes:
+
+- Downloads into its own `higgs_audio_v3` folder.
+- Requires the main Transformers 5 environment.
+- Reference transcript `.txt` files are optional but improve cloning quality.
+
+## DramaBox
+
+```text
+ComfyUI/models/TTS/dramabox/
+├── DramaBox/
+    ├── dramabox-dit-v1.safetensors
+    ├── dramabox-audio-components.safetensors
+    ├── assets/
+    │   └── silence_latent_frame.pt
+    └── gemma-3-12b-it-bnb-4bit/
+        ├── config.json
+        ├── model-00001-of-00002.safetensors
+        ├── model-00002-of-00002.safetensors
+        ├── model.safetensors.index.json
+        └── tokenizer and processor files...
+└── loras/
+    └── <adapter_name>/
+        ├── adapter_config.json
+        └── adapter_model.safetensors
+```
+
+Notes:
+
+- Both repositories download directly into the organized suite folder.
+- Transformers is forced into local-only loading after download.
+- Requires NVIDIA CUDA. Fast mode targets approximately 24GB VRAM; experimental staged/sequential modes can run with less.
+- Integrated training exports LoRA adapters into `dramabox/loras/<adapter_name>/`.
+- Training jobs, normalized datasets, preprocessing caches, checkpoints, and logs are stored under `ComfyUI/output/tts_audio_suite_training/dramabox/`.
+- The LTX-2 Community License requires a paid license for entities with at
+  least USD 10 million in annual revenue.
+
 ## CosyVoice3
 
 ```text
@@ -238,6 +289,57 @@ Notes:
 - Only selected variants download.
 - Shared tokenizer assets are reused.
 
+## MOSS-TTS
+
+```text
+ComfyUI/models/TTS/moss_tts/
+├── MOSS-TTS-Local-Transformer/
+├── MOSS-TTS-v1.5/
+├── moss-tts-v1.5-8b-voice-acting/  # Community - LAION
+├── MOSS-TTS/
+├── MOSS-VoiceGenerator/
+├── MOSS-SoundEffect/
+├── MOSS-TTSD-v1.0/
+├── MOSS-Audio-Tokenizer/
+└── loras/
+    └── <adapter_name>/
+        ├── adapter_config.json
+        └── adapter_model.safetensors
+```
+
+Notes:
+
+- `MOSS-Audio-Tokenizer` is required by the official TTS and TTSD variants.
+- `MOSS-TTS-Local-Transformer` is the smaller 1.7B model.
+- `MOSS-TTS-v1.5` is the current 8B delay model with 31-language support.
+- `moss-tts-v1.5-8b-voice-acting` is an optional third-party LAION full fine-tune for expressive speech, not an official OpenMOSS model.
+- Other compatible full checkpoints placed here are discovered from their `config.json`; unsupported MOSS architectures are rejected explicitly.
+- `MOSS-TTS` is the legacy official 8B delay model.
+- `MOSS-VoiceGenerator` is the 1.7B voice-design provider used by Voice Designer.
+- `MOSS-SoundEffect` is the v1 sound-effect checkpoint used through the MOSS-TTS engine and 🌩️ Sound Effects.
+- `MOSS-TTSD-v1.0` is the official 8B native multi-speaker dialogue model.
+- Integrated training currently exports LoRA adapters into `moss_tts/loras/<adapter_name>/`.
+- Training jobs, temporary manifests, and checkpoints are stored under `ComfyUI/output/tts_audio_suite_training/moss_tts/`.
+
+## MOSS-SoundEffect v2
+
+```text
+ComfyUI/models/TTS/moss_soundeffect_v2/
+└── MOSS-SoundEffect-v2.0/
+    ├── model_index.json
+    ├── scheduler/
+    ├── text_encoder/
+    ├── tokenizer/
+    ├── transformer/
+    └── vae/
+```
+
+Notes:
+
+- This is a separate v2 diffusion family, not a MOSS-TTS checkpoint variant.
+- It runs in the configured ComfyUI environment; the official Apache-2.0 inference package is bundled without modifying its dependencies.
+- The 🌩️ Sound Effects node limits generation to the official 30-second maximum.
+
 ## Granite ASR
 
 ```text
@@ -254,6 +356,7 @@ ComfyUI/models/TTS/granite_asr/
 Notes:
 
 - Granite downloads into its own `granite_asr` folder.
+- `granite-speech-4.1-2b-plus` adds native speaker diarization and native word-level timestamps, but drops Japanese.
 - If Granite word timestamps are enabled, it lazily reuses `Qwen3-ForcedAligner-0.6B` from the Qwen ASR folder instead of duplicating that model.
 
 ## Echo-TTS
@@ -271,3 +374,93 @@ Notes:
 
 - Both components are required and auto-downloaded on first use.
 - License: CC-BY-NC-SA (non-commercial).
+
+## Fish Audio S2 Pro
+
+```text
+ComfyUI/models/TTS/fish_audio_s2_pro/
+├── codec.pth
+├── config.json
+├── model-00001-of-00002.safetensors
+├── model-00002-of-00002.safetensors
+├── model.safetensors.index.json
+└── tokenizer.json
+```
+
+Optional FP8 variant:
+
+```text
+ComfyUI/models/TTS/fish_audio_s2_pro_fp8/
+├── codec.pth
+├── config.json
+├── model.safetensors
+├── quantization_info.json
+└── tokenizer.json
+```
+
+The complete official repository metadata and tokenizer files are downloaded alongside these files. License: Fish Audio Research License (non-commercial without a separate commercial license).
+
+The `s2-pro-bnb-int8` and `s2-pro-bnb-nf4` options reuse `fish_audio_s2_pro/` and quantize its official checkpoint while loading. They do not download another model copy and require `bitsandbytes`.
+
+## Dots TTS
+
+```text
+ComfyUI/models/TTS/dots_tts/
+├── dots.tts-base/
+├── dots.tts-soar/
+└── dots.tts-mf/
+```
+
+Typical checkpoint contents:
+
+```text
+ComfyUI/models/TTS/dots_tts/dots.tts-soar/
+├── added_tokens.json
+├── chat_template.jinja
+├── config.json
+├── latent_stats.pt
+├── llm_config.json
+├── merges.txt
+├── model.safetensors
+├── speaker_encoder.safetensors
+├── special_tokens_map.json
+├── tokenizer.json
+├── tokenizer_config.json
+├── vocab.json
+└── vocoder.safetensors
+```
+
+Notes:
+
+- Downloads into a dedicated `dots_tts/` folder.
+- Native sample rate is 48kHz.
+- Main-environment support works on Transformers 5; on Windows, `normalize_text` falls back to no-op if `WeTextProcessing` is unavailable.
+
+## OmniVoice
+
+```text
+ComfyUI/models/TTS/omnivoice/
+└── OmniVoice/
+```
+
+Main model contents:
+
+```text
+ComfyUI/models/TTS/omnivoice/OmniVoice/
+├── chat_template.jinja
+├── config.json
+├── model.safetensors
+├── tokenizer.json
+├── tokenizer_config.json
+└── audio_tokenizer/
+    ├── config.json
+    ├── model.safetensors
+    └── preprocessor_config.json
+```
+
+Notes:
+
+- Downloads into a dedicated `omnivoice/` folder.
+- Native sample rate is 24kHz.
+- The main OmniVoice model stays in the main Transformers 5 environment.
+- Voice cloning requires reference audio plus explicit reference text in this suite.

@@ -85,7 +85,7 @@ class RVCEngineNode(BaseTTSNode):
             "hubert-base-japanese": "HuBERT Japanese",
             "hubert-base-korean": "HuBERT Korean",
             "chinese-hubert-base": "Chinese HuBERT Base",
-            "hubert-large": "HuBERT Large (Highest Quality)"
+            "hubert-large": "HuBERT Large 1024 (Experimental - Not Recommended)"
         }
         hubert_models = [f"{key}: {desc}" for key, desc in HUBERT_MODELS.items()]
 
@@ -142,9 +142,9 @@ class RVCEngineNode(BaseTTSNode):
 • HuBERT Japanese: Optimized for Japanese voices and phonetics  
 • HuBERT Korean: Specialized for Korean speech patterns
 • Chinese HuBERT: Fine-tuned for Mandarin Chinese tonal patterns
-• HuBERT Large: Highest quality but slower processing
+• HuBERT Large 1024: EXPERIMENTAL - no compatible public pretrained RVC generator; may produce unintelligible audio
 
-Models will auto-download if not present. Choose language-specific models for best results."""
+Models will auto-download if not present. Use Content Vec 768 unless a checkpoint explicitly requires another encoder."""
                 }),
                 
                 # Advanced Pitch Options
@@ -155,6 +155,11 @@ Models will auto-download if not present. Choose language-specific models for be
                 "output_sample_rate": (sample_rates, {
                     "default": 0,
                     "tooltip": "Output sample rate (0=use input rate). 44100/48000 recommended for high quality"
+                }),
+
+                "enable_custom_chunking": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Enable the Voice Changer's outer chunking on top of native RVC segmentation. Leave off unless you specifically need shorter-than-native chunks for extra VRAM safety. Native RVC long-audio segmentation usually starts around 64s on the common half-precision path, and lower on some fp32/low-VRAM paths."
                 }),
                 
                 "device": (["auto", "cuda", "xpu", "cpu", "mps"], {
@@ -197,6 +202,7 @@ Models will auto-download if not present. Choose language-specific models for be
         hubert_model="auto: Automatically select best available model",
         rvc_pitch_options=None,
         output_sample_rate=0,
+        enable_custom_chunking=False,
         device="auto"
     ):
         """
@@ -213,17 +219,24 @@ Models will auto-download if not present. Choose language-specific models for be
             # Parse HuBERT model selection (format: "key: description")
             hubert_key = hubert_model.split(": ")[0] if ": " in hubert_model else hubert_model
             
-            # Ensure HuBERT model is available (download if needed)
-            from engines.rvc.hubert_downloader import ensure_hubert_model
-            hubert_path = ensure_hubert_model(hubert_key)
-            
-            if hubert_path:
-                if hubert_key == "auto":
-                    print(f"✅ HuBERT model ready: auto -> {os.path.basename(hubert_path)}")
-                else:
-                    print(f"✅ HuBERT model ready: {hubert_key}")
+            # Explicit selections can be resolved now. Auto must wait until the
+            # separate voice checkpoint is loaded so 768/1024 dimensions match.
+            if hubert_key == "auto":
+                hubert_path = None
+                print("✅ HuBERT model: auto (will match the selected RVC checkpoint)")
             else:
-                print(f"⚠️ Could not load HuBERT model {hubert_key}, RVC may use fallback")
+                from engines.rvc.hubert_downloader import ensure_hubert_model
+                hubert_path = ensure_hubert_model(hubert_key)
+                if hubert_path:
+                    print(f"✅ HuBERT model ready: {hubert_key}")
+                    if hubert_key == "hubert-large":
+                        print(
+                            "⚠️ HuBERT Large 1024 RVC support is experimental and not recommended. "
+                            "No compatible public pretrained RVC generator is available; "
+                            "models warm-started from the standard 768 generator may be unintelligible."
+                        )
+                else:
+                    print(f"⚠️ Could not load HuBERT model {hubert_key}, RVC may use fallback")
             
             # Set up pitch parameters with sensible defaults
             final_pitch_params = {
@@ -233,6 +246,7 @@ Models will auto-download if not present. Choose language-specific models for be
                 'protect': consonant_protection,
                 'rms_mix_rate': volume_envelope,
                 'resample_sr': output_sample_rate,
+                'enable_custom_chunking': bool(enable_custom_chunking),
                 'hubert_model': hubert_key,
                 'hubert_path': hubert_path
             }
@@ -261,7 +275,12 @@ Models will auto-download if not present. Choose language-specific models for be
                 **final_pitch_params
             }
             
-            print(f"⚙️ RVC Engine created - HuBERT: {hubert_key}, Pitch method: {final_pitch_params['f0_method']}, Device: {device}")
+            print(
+                f"⚙️ RVC Engine created - HuBERT: {hubert_key}, "
+                f"Pitch method: {final_pitch_params['f0_method']}, "
+                f"Custom outer chunking: {final_pitch_params['enable_custom_chunking']}, "
+                f"Device: {device}"
+            )
             if rvc_pitch_options:
                 print("🔧 Advanced pitch options applied")
             

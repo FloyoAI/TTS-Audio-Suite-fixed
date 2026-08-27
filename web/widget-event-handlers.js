@@ -13,14 +13,52 @@ export function attachAllEventHandlers(
     paramTypeSelect, paramInputWrapper, addParamBtn, presetButtons, presetTitles, updatePresetGlows,
     formatBtn, validateBtn, fontFamilySelect, fontSizeInput, fontSizeDisplay, setFontSize, setFontFamily,
     showNotification, resizeDivider, sidebar, setSidebarWidth, setUIScale, setSidebarResizeActive,
-    // Inline edit controls
-    paraSelect, paraIterSlider, addParaBtn,
-    emotionSelect, emotionIterSlider, addEmotionBtn,
-    styleSelect, styleIterSlider, addStyleBtn,
-    speedSelect, speedIterSlider, addSpeedBtn,
-    restorePassSlider, restoreRefInput, addRestoreBtn,
+    inlineTagControls,
     openFindReplace, focusNextFindMatch, focusPreviousFindMatch
 ) {
+    const {
+        inlineEngineSelect,
+        step: {
+            paraSelect, paraIterSlider, addParaBtn,
+            emotionSelect, emotionIterSlider, addEmotionBtn,
+            styleSelect, styleIterSlider, addStyleBtn,
+            speedSelect, speedIterSlider, addSpeedBtn,
+            restorePassSlider, restoreRefInput, addRestoreBtn,
+        },
+        higgs: {
+            emotionSelect: higgsEmotionSelect,
+            addEmotionBtn: addHiggsEmotionBtn,
+            styleSelect: higgsStyleSelect,
+            addStyleBtn: addHiggsStyleBtn,
+            prosodySelect: higgsProsodySelect,
+            addProsodyBtn: addHiggsProsodyBtn,
+            sfxSelect: higgsSfxSelect,
+            addSfxBtn: addHiggsSfxBtn,
+        },
+        cosy: {
+            singleTagSelect: cosySingleTagSelect,
+            addSingleTagBtn,
+            wrapperTagSelect: cosyWrapperTagSelect,
+            addWrapperTagBtn,
+        },
+        omnivoice: {
+            tagSelect: omnivoiceTagSelect,
+            addTagBtn: addOmniVoiceTagBtn,
+        },
+        indexTTS: {
+            vectorModeSelect: indexTTSVectorModeSelect,
+            addVectorBtn: addIndexTTSVectorBtn,
+            namedEmotionSelect: indexTTSNamedEmotionSelect,
+            namedOperationSelect: indexTTSNamedOperationSelect,
+            namedValueInput: indexTTSNamedValueInput,
+            addNamedEmotionBtn: addIndexTTSNamedEmotionBtn,
+            presetSelect: indexTTSPresetSelect,
+            addTextPresetBtn: addIndexTTSTextPresetBtn,
+            emotionTextInput: indexTTSEmotionTextInput,
+            addEmotionTextBtn: addIndexTTSEmotionTextBtn,
+        },
+    } = inlineTagControls;
+
     // Block ComfyUI shortcuts when editor is focused, but allow Enter, Alt, and Ctrl combinations
     editor.addEventListener("keydown", (e) => {
         // Don't block Enter, Alt, or Ctrl key combinations (allow copy/paste/cut)
@@ -30,16 +68,27 @@ export function attachAllEventHandlers(
         }
     }, true); // Use capture phase to intercept before other handlers
 
+    inlineEngineSelect?.addEventListener("change", () => {
+        const plainText = getPlainText();
+        setEditorText(plainText);
+    });
+
     // Manually handle Enter key to insert newline
     editor.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && document.activeElement === editor) {
             e.preventDefault();
             e.stopPropagation();
-            document.execCommand("insertLineBreak");
-            // Trigger input event to update history
-            setTimeout(() => {
-                editor.dispatchEvent(new Event("input", { bubbles: true }));
-            }, 0);
+            const plainText = getPlainText();
+            const selection = getSelectionRange();
+            const start = selection?.start ?? getCaretPos();
+            const end = selection?.end ?? start;
+            setEditorText(plainText.slice(0, start) + "\n" + plainText.slice(end));
+            setCaretPos(start + 1);
+            editor.dispatchEvent(new InputEvent("input", {
+                bubbles: true,
+                inputType: "insertLineBreak",
+                data: null,
+            }));
         }
     });
 
@@ -398,6 +447,33 @@ export function attachAllEventHandlers(
         return selection;
     };
 
+    const replaceCharacterComponentInColonTag = (text, caretPos, character) => {
+        const tagStart = text.lastIndexOf("[", caretPos);
+        const tagEnd = text.indexOf("]", caretPos);
+        if (tagStart < 0 || tagEnd < caretPos) return null;
+
+        const content = text.slice(tagStart + 1, tagEnd);
+        const colonIndex = content.indexOf(":");
+        if (colonIndex <= 0) return null;
+
+        const first = content.slice(0, colonIndex).trim();
+        const secondEndRelative = content.indexOf("|", colonIndex);
+        const secondEnd = secondEndRelative >= 0 ? secondEndRelative : content.length;
+        const second = content.slice(colonIndex + 1, secondEnd).trim();
+        const parameterKey = /^(seed|temp|temperature|cfg|cfg_weight|emotion_alpha|vector|emotion|speed|top_p|top_k|steps|instruction|quality|sound_event|ambient_sound)$/i;
+        if (parameterKey.test(first) || /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(second)) return null;
+
+        const caretRelative = caretPos - (tagStart + 1);
+        const replacingFirst = caretRelative <= colonIndex;
+        const componentStart = replacingFirst ? 0 : colonIndex + 1;
+        const componentEnd = replacingFirst ? colonIndex : secondEnd;
+        const newContent = content.slice(0, componentStart) + character + content.slice(componentEnd);
+        return {
+            newText: text.slice(0, tagStart + 1) + newContent + text.slice(tagEnd),
+            newCaretPos: tagStart + 1 + componentStart + character.length,
+        };
+    };
+
     // Add character button
     addCharBtn.addEventListener("click", () => {
         const char = charInput.value.trim() || charSelect.value;
@@ -415,6 +491,20 @@ export function attachAllEventHandlers(
             caretPos = selection.start + leadingWhitespace + 1; // position after [
         } else {
             caretPos = selection ? selection.start : getCaretPos();
+        }
+
+        const colonComponentResult = replaceCharacterComponentInColonTag(text, caretPos, char);
+        if (colonComponentResult) {
+            setEditorText(colonComponentResult.newText);
+            setTimeout(() => {
+                setCaretPos(colonComponentResult.newCaretPos);
+                state.addToHistory(colonComponentResult.newText, colonComponentResult.newCaretPos);
+                state.saveToLocalStorage(storageKey);
+                editor.focus();
+            }, 0);
+            widget.callback?.(widget.value);
+            historyStatus.textContent = state.getHistoryStatus();
+            return;
         }
 
         const result = TagUtilities.modifyTagContent(text, caretPos, (tagContent) => {
@@ -565,6 +655,8 @@ export function attachAllEventHandlers(
     // Format button
     formatBtn.addEventListener("click", () => {
         let text = getPlainText();
+        // Pause/wait/stop are timeline tags, not character parameters.
+        text = TagUtilities.normalizeStandalonePauseTags(text);
         // Normalize spacing around brackets: multiple spaces/tabs become single space
         text = text.replace(/[ \t]+\[/g, " [").replace(/\[[ \t]+/g, "[");
         // Remove spaces/tabs before ], but keep newlines
@@ -588,12 +680,58 @@ export function attachAllEventHandlers(
 
     // Validate button
     validateBtn.addEventListener("click", () => {
-        const validation = TagUtilities.validateTagSyntax(getPlainText());
-        if (validation.valid) {
-            showNotification("✅ Tag syntax is valid!");
-        } else {
-            showNotification("❌ " + validation.error);
+        const text = getPlainText();
+        const bracketValidation = TagUtilities.validateTagSyntax(text);
+        if (!bracketValidation.valid) {
+            showNotification("❌ " + bracketValidation.error);
+            return;
         }
+
+        const inlineSyntaxValidation = TagUtilities.validateInlineSyntax(text);
+        if (!inlineSyntaxValidation.valid) {
+            showNotification("❌ " + inlineSyntaxValidation.error, 3000);
+            return;
+        }
+
+        const targetEngine = inlineEngineSelect?.value || state.activeInlineTagEngine || "step_audio_editx";
+        const inlineValidation = TagUtilities.validateInlineTags(text, targetEngine);
+
+        if (inlineValidation.unknownTags.length > 0) {
+            showNotification(`❌ Found ${inlineValidation.unknownTags.length} unrecognized inline tag(s)`, 3000);
+            return;
+        }
+
+        if (inlineValidation.foreignTags.length > 0) {
+            const engineLabel = inlineEngineSelect?.selectedOptions?.[0]?.textContent || targetEngine;
+            const convertibleCount = inlineValidation.convertibleTags.length;
+            const skippedCount = inlineValidation.foreignTags.length - convertibleCount;
+
+            const baseMessage = `Found ${inlineValidation.foreignTags.length} inline tag(s) that do not belong to ${engineLabel}.`;
+
+            if (convertibleCount > 0) {
+                let message = baseMessage;
+                message += `\n\nConvert ${convertibleCount} safe tag(s) now?`;
+                if (skippedCount > 0) {
+                    message += `\n${skippedCount} tag(s) have no safe equivalent and will stay unchanged.`;
+                }
+                if (window.confirm(message)) {
+                    const conversion = TagUtilities.convertInlineTagsForEngine(text, targetEngine);
+                    if (conversion.converted > 0 && conversion.text !== text) {
+                        commitEditorTextChange(conversion.text, getCaretPos());
+                        showNotification(`✓ Converted ${conversion.converted} inline tag(s)${conversion.skipped ? `, skipped ${conversion.skipped}` : ""}`, 3000);
+                        return;
+                    }
+                }
+
+                showNotification(`⚠️ Found ${inlineValidation.foreignTags.length} foreign inline tag(s) for ${engineLabel}. ${convertibleCount} can be auto-converted, ${skippedCount} cannot.`, 4000);
+                return;
+            }
+
+            showNotification(`⚠️ Found ${inlineValidation.foreignTags.length} foreign inline tag(s) for ${engineLabel}; no safe auto-conversion is defined yet`, 4000);
+            return;
+        }
+
+        showNotification("✅ Tags match the selected engine!", 2000);
     });
 
     // Preset buttons
@@ -845,8 +983,86 @@ export function attachAllEventHandlers(
         return { modified: false };
     };
 
-    // Helper function to insert inline edit tag (with pipe-separator support)
-    const insertInlineTag = (tagPart) => {
+    const insertTextSnippet = (snippet, {
+        caretOffset = snippet.length,
+        notification = `✓ Inserted: ${snippet}`,
+    } = {}) => {
+        const selection = getSelection();
+        const plainText = getPlainText();
+        const insertStart = selection ? selection.start : getCaretPos();
+        const insertEnd = selection ? selection.end : insertStart;
+        const newText = plainText.substring(0, insertStart) + snippet + plainText.substring(insertEnd);
+        commitEditorTextChange(newText, insertStart + caretOffset);
+        showNotification(notification, 1500);
+    };
+
+    const wrapSelectionWithTag = (tagName) => {
+        const selection = getSelection();
+        if (selection) {
+            const wrappedText = `<${tagName}>${selection.text}</${tagName}>`;
+            const plainText = getPlainText();
+            const newText = plainText.substring(0, selection.start) + wrappedText + plainText.substring(selection.end);
+            commitEditorTextChange(newText, selection.start + wrappedText.length);
+            showNotification(`✓ Wrapped with <${tagName}>`, 1500);
+            return;
+        }
+
+        const placeholder = "text";
+        const snippet = `<${tagName}>${placeholder}</${tagName}>`;
+        const caretOffset = tagName.length + 2;
+        insertTextSnippet(snippet, {
+            caretOffset,
+            notification: `✓ Inserted: ${snippet}`,
+        });
+    };
+
+    const replaceTagAroundCaret = (text, caretPos, matcher, replacement) => {
+        matcher.lastIndex = 0;
+        let match;
+        while ((match = matcher.exec(text)) !== null) {
+            const start = match.index;
+            const end = start + match[0].length;
+            if (caretPos < start || caretPos > end) {
+                continue;
+            }
+
+            return {
+                modified: true,
+                newText: text.substring(0, start) + replacement + text.substring(end),
+                newCaretPos: start + replacement.length,
+            };
+        }
+        return { modified: false };
+    };
+
+    const insertOrReplaceHiggsTag = (category, value) => {
+        const caretPos = getCaretPos();
+        const plainText = getPlainText();
+        const replacement = `<|${category}:${value}|>`;
+
+        const result = replaceTagAroundCaret(
+            plainText,
+            caretPos,
+            new RegExp(
+                `<\\|(?:emotion|style|prosody|sfx):[^|>]+\\|>|<(?:emotion|style|prosody|sfx):[^>]+>|<(?:Laughter|Breathing|Sigh|Uhm|Surprise-oh|Surprise-ah|Surprise-wa|Confirmation-en|Question-ei|Dissatisfaction-hnn)(?::\\d+)?>`,
+                "g"
+            ),
+            replacement
+        );
+
+        if (result.modified) {
+            commitEditorTextChange(result.newText, result.newCaretPos);
+            showNotification("✓ Updated inline tag", 1500);
+            return;
+        }
+
+        insertTextSnippet(replacement, {
+            notification: `✓ Inserted: ${replacement}`,
+        });
+    };
+
+    // Helper function to insert Step Audio EditX inline tag (with pipe-separator support)
+    const insertStepInlineTag = (tagPart) => {
         const caretPos = getCaretPos();
         const plainText = getPlainText();
 
@@ -899,7 +1115,7 @@ export function attachAllEventHandlers(
 
         const iterations = paraIterSlider.value;
         const tagPart = iterations === "1" ? type : `${type}:${iterations}`;
-        insertInlineTag(tagPart);
+        insertStepInlineTag(tagPart);
     });
 
     // Emotion tag insertion
@@ -912,7 +1128,7 @@ export function attachAllEventHandlers(
 
         const iterations = emotionIterSlider.value;
         const tagPart = iterations === "1" ? `emotion:${emotion}` : `emotion:${emotion}:${iterations}`;
-        insertInlineTag(tagPart);
+        insertStepInlineTag(tagPart);
     });
 
     // Style tag insertion
@@ -925,7 +1141,7 @@ export function attachAllEventHandlers(
 
         const iterations = styleIterSlider.value;
         const tagPart = iterations === "1" ? `style:${style}` : `style:${style}:${iterations}`;
-        insertInlineTag(tagPart);
+        insertStepInlineTag(tagPart);
     });
 
     // Speed tag insertion
@@ -938,7 +1154,7 @@ export function attachAllEventHandlers(
 
         const iterations = speedIterSlider.value;
         const tagPart = iterations === "1" ? `speed:${speed}` : `speed:${speed}:${iterations}`;
-        insertInlineTag(tagPart);
+        insertStepInlineTag(tagPart);
     });
 
     // Restore tag insertion
@@ -958,6 +1174,196 @@ export function attachAllEventHandlers(
             tagPart = `restore:${passes}`;
         }
 
-        insertInlineTag(tagPart);
+        insertStepInlineTag(tagPart);
     });
+
+    const bindHiggsTagInsert = (category, select, button, missingMessage) => {
+        button.addEventListener("click", () => {
+            const value = select.value;
+            if (!value) {
+                showNotification(missingMessage, 2000);
+                return;
+            }
+
+            insertOrReplaceHiggsTag(category, value);
+        });
+    };
+
+    bindHiggsTagInsert("emotion", higgsEmotionSelect, addHiggsEmotionBtn, "⚠️ Select a Higgs emotion first");
+    bindHiggsTagInsert("style", higgsStyleSelect, addHiggsStyleBtn, "⚠️ Select a Higgs style first");
+    bindHiggsTagInsert("prosody", higgsProsodySelect, addHiggsProsodyBtn, "⚠️ Select a Higgs prosody tag first");
+    bindHiggsTagInsert("sfx", higgsSfxSelect, addHiggsSfxBtn, "⚠️ Select a Higgs SFX tag first");
+
+    addSingleTagBtn.addEventListener("click", () => {
+        const tagName = cosySingleTagSelect.value;
+        if (!tagName) {
+            showNotification("⚠️ Select a CosyVoice3 tag first", 2000);
+            return;
+        }
+
+        const tag = `<${tagName}>`;
+        insertTextSnippet(tag);
+    });
+
+    addWrapperTagBtn.addEventListener("click", () => {
+        const tagName = cosyWrapperTagSelect.value;
+        if (!tagName) {
+            showNotification("⚠️ Select a CosyVoice3 wrapper tag first", 2000);
+            return;
+        }
+
+        wrapSelectionWithTag(tagName);
+    });
+
+    addOmniVoiceTagBtn.addEventListener("click", () => {
+        const tagName = omnivoiceTagSelect.value;
+        if (!tagName) {
+            showNotification("⚠️ Select an OmniVoice tag first", 2000);
+            return;
+        }
+
+        const tag = `<${tagName}>`;
+        insertTextSnippet(tag);
+    });
+
+    const isIndexTTSEmotionTag = (tag) => {
+        if (/^\[(?:vector|emotion):/i.test(tag)) return true;
+        const content = tag.slice(1, -1);
+        const emotionNames = "happy|angry|sad|afraid|disgusted|melancholic|surprised|calm";
+        return content.split("|").every(part => new RegExp(`^(?:${emotionNames}):[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$`, "i").test(part.trim()));
+    };
+
+    const appendIndexTTSParameterToTag = (existingTag, replacement) => {
+        if (!/^\[[^\[\]]+\]$/.test(existingTag) || isIndexTTSEmotionTag(existingTag)) return null;
+
+        const parameter = replacement.slice(1, -1).trim();
+        const parameterKey = parameter.split(":", 1)[0].trim().toLowerCase();
+        if (!/^(?:vector|emotion|happy|angry|sad|afraid|disgusted|melancholic|surprised|calm)$/.test(parameterKey)) {
+            return null;
+        }
+
+        const parts = existingTag.slice(1, -1).split("|").map(part => part.trim()).filter(Boolean);
+        const existingIndex = parts.findIndex((part, index) => {
+            if (index === 0 || !part.includes(":")) return false;
+            return part.split(":", 1)[0].trim().toLowerCase() === parameterKey;
+        });
+        if (existingIndex >= 0) parts[existingIndex] = parameter;
+        else parts.push(parameter);
+        return `[${parts.join("|")}]`;
+    };
+
+    const insertOrReplaceIndexTTSTag = (replacement) => {
+        const text = getPlainText();
+        const caretPos = getCaretPos();
+        const start = text.lastIndexOf("[", caretPos);
+        const closingIndex = text.indexOf("]", caretPos);
+        if (start >= 0 && closingIndex >= caretPos) {
+            const existing = text.slice(start, closingIndex + 1);
+            if (isIndexTTSEmotionTag(existing)) {
+                const newText = text.slice(0, start) + replacement + text.slice(closingIndex + 1);
+                commitEditorTextChange(newText, start + replacement.length);
+                showNotification(`✓ Updated: ${replacement}`, 1500);
+                return;
+            }
+
+            const composed = appendIndexTTSParameterToTag(existing, replacement);
+            if (composed) {
+                const newText = text.slice(0, start) + composed + text.slice(closingIndex + 1);
+                commitEditorTextChange(newText, start + composed.length);
+                showNotification(`✓ Added emotion parameter: ${composed}`, 1500);
+                return;
+            }
+        }
+        insertTextSnippet(replacement);
+    };
+
+    addIndexTTSVectorBtn.addEventListener("click", () => {
+        const relative = indexTTSVectorModeSelect.value === "delta";
+        const values = Array(8).fill(relative ? "+0" : "0");
+        insertOrReplaceIndexTTSTag(`[vector:${values.join(",")}]`);
+    });
+
+    addIndexTTSNamedEmotionBtn.addEventListener("click", () => {
+        const emotion = indexTTSNamedEmotionSelect.value;
+        const magnitude = Math.max(0, Math.min(1.2, Number(indexTTSNamedValueInput.value) || 0));
+        const operation = indexTTSNamedOperationSelect.value;
+        const prefix = operation === "positive" ? "+" : operation === "negative" ? "-" : "";
+        insertOrReplaceIndexTTSTag(`[${emotion}:${prefix}${magnitude}]`);
+    });
+
+    addIndexTTSTextPresetBtn.addEventListener("click", () => {
+        const preset = indexTTSPresetSelect.value;
+        if (!preset) {
+            showNotification("⚠️ Select an IndexTTS text preset first", 2000);
+            return;
+        }
+        const selectedOption = indexTTSPresetSelect.selectedOptions[0];
+        if (selectedOption?.dataset.presetType === "vector") {
+            const values = JSON.parse(selectedOption.dataset.vectorValues || "[]");
+            if (values.length !== 8) {
+                showNotification("⚠️ This vector preset is invalid", 2000);
+                return;
+            }
+            insertOrReplaceIndexTTSTag(`[vector:${values.join(",")}]`);
+            return;
+        }
+        insertOrReplaceIndexTTSTag(`[emotion:${preset}]`);
+    });
+
+    addIndexTTSEmotionTextBtn.addEventListener("click", () => {
+        const description = indexTTSEmotionTextInput.value.trim();
+        if (!description) {
+            showNotification("⚠️ Enter an emotion description first", 2000);
+            return;
+        }
+        const quoted = !description.includes('"')
+            ? `"${description}"`
+            : !description.includes("'")
+                ? `'${description}'`
+                : `"${description.replaceAll('"', '”')}"`;
+        insertOrReplaceIndexTTSTag(`[emotion:${quoted}]`);
+    });
+
+    return {
+        beginExternalTransaction() {
+            flushPendingHistory();
+            return {
+                originalText: getPlainText(),
+                originalCaretPos: getCaretPos(),
+            };
+        },
+        previewExternalTransaction(transaction, newText, caretPos) {
+            setEditorText(newText);
+            state.text = newText;
+            widget.value = newText;
+            widget.callback?.(newText);
+            if (Number.isFinite(caretPos)) state.lastCursorPosition = caretPos;
+        },
+        cancelExternalTransaction(transaction) {
+            const originalText = transaction.originalText;
+            const caretPos = getClampedCaretPos(originalText, transaction.originalCaretPos, 0);
+            setEditorText(originalText);
+            state.text = originalText;
+            widget.value = originalText;
+            widget.callback?.(originalText);
+            lastHistoryText = originalText;
+            state.saveToLocalStorage(storageKey);
+            historyStatus.textContent = state.getHistoryStatus();
+            setTimeout(() => setCaretPos(caretPos), 0);
+        },
+        commitExternalTransaction(transaction, finalText, caretPos) {
+            const finalCaretPos = getClampedCaretPos(finalText, caretPos, transaction.originalCaretPos);
+            setEditorText(finalText);
+            state.text = finalText;
+            if (finalText !== transaction.originalText) {
+                state.addToHistory(finalText, finalCaretPos);
+            }
+            widget.value = finalText;
+            widget.callback?.(finalText);
+            lastHistoryText = finalText;
+            state.saveToLocalStorage(storageKey);
+            historyStatus.textContent = state.getHistoryStatus();
+            setTimeout(() => setCaretPos(finalCaretPos), 0);
+        },
+    };
 }

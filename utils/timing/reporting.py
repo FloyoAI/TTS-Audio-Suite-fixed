@@ -25,6 +25,55 @@ class SRTReportGenerator:
             if current.end_time > next_sub.start_time:
                 overlapping_segments.add(i)
         return overlapping_segments
+
+    @staticmethod
+    def _get_native_duration_summary(adjustments: List[Dict[str, Any]]) -> List[str]:
+        native_adjustments = [
+            adj for adj in adjustments
+            if adj.get("native_duration_targeting_enabled")
+            and adj.get("native_requested_duration") is not None
+            and adj.get("pre_timing_generated_duration") is not None
+        ]
+        if not native_adjustments:
+            return []
+
+        abs_errors = [
+            abs(adj["pre_timing_generated_duration"] - adj["native_requested_duration"])
+            for adj in native_adjustments
+        ]
+        signed_errors = [
+            adj["pre_timing_generated_duration"] - adj["native_requested_duration"]
+            for adj in native_adjustments
+        ]
+
+        avg_abs_error = sum(abs_errors) / len(abs_errors)
+        max_abs_error = max(abs_errors)
+        avg_signed_error = sum(signed_errors) / len(signed_errors)
+
+        return [
+            "",
+            "Native duration targeting summary:",
+            f"  Segments using native targeting: {len(native_adjustments)}/{len(adjustments)}",
+            f"  Average pre-timing duration error: {avg_signed_error:+.3f}s",
+            f"  Average absolute pre-timing error: {avg_abs_error:.3f}s",
+            f"  Maximum absolute pre-timing error: {max_abs_error:.3f}s",
+        ]
+
+    @staticmethod
+    def _get_dramabox_silence_summary(
+        adjustments: List[Dict[str, Any]],
+    ) -> List[str]:
+        affected_count = sum(
+            1 for adjustment in adjustments
+            if adjustment.get("dramabox_near_silent")
+        )
+        if not affected_count:
+            return []
+
+        return [
+            f"  ⚠️ Near-silent DramaBox subtitles: "
+            f"{affected_count}/{len(adjustments)}"
+        ]
     
     def generate_timing_report(self, subtitles: List, adjustments: List[Dict], timing_mode: str, has_original_overlaps: bool = False, mode_switched: bool = False, original_mode: str = None, stretch_method: str = None) -> str:
         """Generate detailed timing report with original vs generated overlap distinction"""
@@ -57,6 +106,9 @@ No segments were processed due to immediate interruption.
             f"Total duration: {subtitles[-1].end_time:.3f}s",
         ]
 
+        if any(adj.get("native_duration_targeting_enabled") for adj in adjustments):
+            report_lines.append("Native duration targeting: enabled")
+
         # Add stretcher method info if available
         if stretch_method and timing_mode == "stretch_to_fit":
             report_lines.append(f"Time stretcher: {stretch_method}")
@@ -66,9 +118,10 @@ No segments were processed due to immediate interruption.
         if timing_mode == "smart_natural":
             # For smart_natural mode, iterate directly over the detailed adjustments report
             for adj in adjustments:
+                silence_info = " ⚠️ near-silent" if adj.get("dramabox_near_silent") else ""
                 report_lines.append(
                     f"  {adj['sequence']:2d}. Original SRT: {adj['original_srt_start']:6.2f}-{adj['original_srt_end']:6.2f}s "
-                    f"(Target: {adj['original_srt_duration']:.2f}s)"
+                    f"(Target: {adj['original_srt_duration']:.2f}s){silence_info}"
                 )
                 report_lines.append(f"      Natural Audio: {adj['natural_audio_duration']:.3f}s")
                 
@@ -86,6 +139,7 @@ No segments were processed due to immediate interruption.
         elif timing_mode == "concatenate":
             # For concatenate mode, show original vs new timings
             for adj in adjustments:
+                silence_info = " ⚠️ near-silent" if adj.get("dramabox_near_silent") else ""
                 timing_change = adj.get('timing_change', 0.0)
                 timing_change_info = ""
                 if abs(timing_change) > 0.01:  # Only show significant changes
@@ -96,12 +150,14 @@ No segments were processed due to immediate interruption.
                 
                 report_lines.append(
                     f"  {adj['sequence']:2d}. Original SRT: {adj['original_srt_start']:6.2f}-{adj['original_srt_end']:6.2f}s "
-                    f"→ New: {adj['start_time']:6.2f}-{adj['end_time']:6.2f}s ({adj['natural_duration']:.2f}s){timing_change_info}"
+                    f"→ New: {adj['start_time']:6.2f}-{adj['end_time']:6.2f}s ({adj['natural_duration']:.2f}s)"
+                    f"{timing_change_info}{silence_info}"
                 )
                 report_lines.append(f"      Text: {adj['original_text'][:60]}{'...' if len(adj['original_text']) > 60 else ''}")
         else:
             # For other modes, iterate using zip with original subtitles
             for i, (subtitle, adj) in enumerate(zip(subtitles, adjustments)):
+                silence_info = " ⚠️ near-silent" if adj.get("dramabox_near_silent") else ""
                 if timing_mode == "pad_with_silence":
                     # For pad_with_silence mode, show overlap/gap information with distinction
                     timing_info = ""
@@ -142,7 +198,8 @@ No segments were processed due to immediate interruption.
                     
                     report_lines.append(
                         f"  {subtitle.sequence:2d}. {subtitle.start_time:6.2f}-{subtitle.end_time:6.2f}s "
-                        f"({subtitle.duration:.2f}s target, {adj['natural_duration']:.2f}s natural){timing_info}"
+                        f"({subtitle.duration:.2f}s target, {adj['natural_duration']:.2f}s natural)"
+                        f"{timing_info}{silence_info}"
                     )
                 else:
                     # For other modes (e.g., stretch_to_fit), show stretch information and original overlaps
@@ -163,7 +220,8 @@ No segments were processed due to immediate interruption.
                     
                     report_lines.append(
                         f"  {subtitle.sequence:2d}. {subtitle.start_time:6.2f}-{subtitle.end_time:6.2f}s "
-                        f"({subtitle.duration:.2f}s target, {adj['natural_duration']:.2f}s natural){stretch_info}{overlap_info}"
+                        f"({subtitle.duration:.2f}s target, {adj['natural_duration']:.2f}s natural)"
+                        f"{stretch_info}{overlap_info}{silence_info}"
                     )
                 
                 report_lines.append(f"      Text: {subtitle.text[:60]}{'...' if len(subtitle.text) > 60 else ''}")
@@ -236,6 +294,8 @@ No segments were processed due to immediate interruption.
                 summary_lines.append(f"  Perfect timing match - no gaps or overlaps")
             
             report_lines.extend(summary_lines)
+            report_lines.extend(self._get_dramabox_silence_summary(adjustments))
+            report_lines.extend(self._get_native_duration_summary(adjustments))
         elif timing_mode == "concatenate":
             # Summary for concatenate mode
             total_original_duration = sum(adj.get('original_srt_duration', 0) for adj in adjustments)
@@ -258,6 +318,8 @@ No segments were processed due to immediate interruption.
                 f"  Audio quality: Natural (no stretching or padding applied)"
             ]
             report_lines.extend(summary_lines)
+            report_lines.extend(self._get_dramabox_silence_summary(adjustments))
+            report_lines.extend(self._get_native_duration_summary(adjustments))
         elif timing_mode == "smart_natural":
             # Define the same threshold used in smart timing processing
             INSIGNIFICANT_TRUNCATION_THRESHOLD = 0.05
@@ -277,6 +339,8 @@ No segments were processed due to immediate interruption.
                 f"  Segments truncated: {total_truncated}/{len(adjustments)}",
             ]
             report_lines.extend(summary_lines)
+            report_lines.extend(self._get_dramabox_silence_summary(adjustments))
+            report_lines.extend(self._get_native_duration_summary(adjustments))
         else:
             total_stretch_needed = sum(1 for adj in adjustments if adj['needs_stretching'])
             avg_stretch = np.mean([adj['stretch_factor'] for adj in adjustments])
@@ -293,6 +357,8 @@ No segments were processed due to immediate interruption.
                 summary_lines.append(f"  Original SRT overlaps: {total_original_overlaps} segments (expected behavior - segments will overlap as intended)")
             
             report_lines.extend(summary_lines)
+            report_lines.extend(self._get_dramabox_silence_summary(adjustments))
+            report_lines.extend(self._get_native_duration_summary(adjustments))
         
         return "\n".join(report_lines)
     

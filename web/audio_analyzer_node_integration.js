@@ -31,6 +31,7 @@ export class AudioAnalyzerNodeIntegration {
         // console.log(`✅ Audio Wave Analyzer: Loaded ${data.waveform.samples.length} audio samples, duration: ${data.duration}s`);  // Debug: data loading
         
         // Update waveform data - handle the correct data structure from Python
+        this.core.canvasWarningMessage = null;
         this.core.waveformData = {
             samples: data.waveform?.samples || [],
             time: data.waveform?.time || [],
@@ -86,7 +87,7 @@ export class AudioAnalyzerNodeIntegration {
     }
     
     // Handle audio file selection
-    onAudioFileSelected(filePath) {
+    async onAudioFileSelected(filePath) {
         console.log('Audio file selected:', filePath);
         
         if (!filePath || filePath.trim() === '') {
@@ -102,19 +103,27 @@ export class AudioAnalyzerNodeIntegration {
         // Update UI
         this.core.ui.updateStatus('Loading audio file...');
         this.core.visualization.redraw();
-        
-        // Trigger node execution
-        this.triggerNodeExecution();
-        
+
+        if (this.hasConnectedAudio()) {
+            this.showConnectedAudioWarning();
+            return;
+        }
+
         this.core.showMessage(`Loading: ${filePath}`);
+        await this.runFilePreviewAnalysis();
     }
     
     // Handle parameter changes (now works like manual refresh)
-    onParametersChanged() {
+    async onParametersChanged() {
         // console.log('Analysis requested');  // Debug: analysis trigger
         
         if (!this.hasAudioSource()) {
             this.core.showMessage('No audio source available for analysis');
+            return;
+        }
+
+        if (!this.hasConnectedAudio()) {
+            await this.runFilePreviewAnalysis();
             return;
         }
         
@@ -140,6 +149,10 @@ export class AudioAnalyzerNodeIntegration {
         // Update UI
         this.core.ui.updateStatus('Analyzing audio...');
         this.core.visualization.redraw();
+
+        if (!(await this.hasPersistentVisualizationCache())) {
+            this.core.node.audioAnalyzerForceRun = Date.now();
+        }
         
         // Trigger node execution (same as manual refresh)
         this.core.node.lastExecutionTime = Date.now();
@@ -152,6 +165,84 @@ export class AudioAnalyzerNodeIntegration {
         setTimeout(() => this.core.node.checkForResults(), 6000);
         
         this.core.showMessage('Analyzing audio...');
+    }
+
+    async runFilePreviewAnalysis() {
+        const payload = this.getPreviewPayload();
+        if (!payload.audio_file) {
+            this.core.showMessage('No audio file selected for preview analysis');
+            return;
+        }
+
+        try {
+            this.isAnalyzing = true;
+            this.core.canvasWarningMessage = null;
+            this.core.ui.updateStatus('Analyzing audio preview...');
+            this.core.showMessage('Analyzing audio preview...');
+            this.core.visualization.redraw();
+
+            const response = await fetch('/api/tts-audio-suite/audio-analyzer-preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                cache: 'no-store'
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data?.error || `HTTP ${response.status}`);
+            }
+
+            this.updateVisualization(data.visualization_data || data);
+        } catch (error) {
+            console.error('Audio analyzer preview failed:', error);
+            this.core.ui.updateStatus('Preview analysis failed');
+            this.core.showMessage(`Preview analysis failed: ${error.message}`);
+        } finally {
+            this.isAnalyzing = false;
+        }
+    }
+
+    getPreviewPayload() {
+        const getWidgetValue = (name, fallback = '') => {
+            const widget = this.core.node.widgets?.find(w => w.name === name);
+            return widget?.value ?? fallback;
+        };
+
+        return {
+            node_id: String(this.core.node.id),
+            audio_file: String(getWidgetValue('audio_file', '') || ''),
+            analysis_method: getWidgetValue('analysis_method', 'silence'),
+            precision_level: getWidgetValue('precision_level', 'milliseconds'),
+            visualization_points: Number(getWidgetValue('visualization_points', 2000)) || 2000,
+            manual_regions: String(getWidgetValue('manual_regions', '') || ''),
+            region_labels: String(getWidgetValue('region_labels', '') || ''),
+            export_format: getWidgetValue('export_format', 'f5tts'),
+        };
+    }
+
+    async hasPersistentVisualizationCache() {
+        if (!this.core.node?.id || this.core.node.id < 0) return false;
+
+        try {
+            const response = await fetch(`/output/audio_analyzer_cache_${this.core.node.id}.json?t=${Date.now()}`, {
+                cache: 'no-store'
+            });
+            return response.ok;
+        } catch {
+            return false;
+        }
+    }
+
+    showConnectedAudioWarning() {
+        const warning = 'Dropped file was loaded, but connected AUDIO takes priority.';
+        this.core.ui.updateStatus('Connected AUDIO input active');
+        this.core.showMessage(`${warning} Run the workflow to analyze connected audio, or disconnect the AUDIO input to preview files.`, 'error');
+
+        if (!this.core.waveformData) {
+            this.core.canvasWarningMessage = warning;
+            this.core.visualization.redraw();
+        }
     }
     
     // Handle audio connection
@@ -174,7 +265,7 @@ export class AudioAnalyzerNodeIntegration {
     }
     
     // Trigger node execution
-    triggerNodeExecution() {
+    async triggerNodeExecution() {
         if (this.isAnalyzing) {
             console.log('Analysis already in progress');
             return;
@@ -183,14 +274,16 @@ export class AudioAnalyzerNodeIntegration {
         this.isAnalyzing = true;
         
         try {
-            // Queue the node for execution
-            if (this.core.node.graph && this.core.node.graph.runStep) {
-                this.core.node.graph.runStep([this.core.node]);
-            } else {
-                // Fallback: manually trigger execution
-                console.log('Triggering manual node execution');
-                this.core.node.doExecute?.();
-            }
+            // Queue backend execution through ComfyUI. Legacy LiteGraph execution
+            // methods do not execute Python nodes and are being removed upstream.
+            this.core.node.audioAnalyzerForceRun = Date.now();
+            this.core.node.lastExecutionTime = Date.now();
+            await window.app.queuePrompt();
+
+            // Check for results after execution in case the normal execution hook
+            // does not deliver the output to the analyzer interface immediately.
+            setTimeout(() => this.core.node.checkForResults(), 3000);
+            setTimeout(() => this.core.node.checkForResults(), 6000);
         } catch (error) {
             console.error('Failed to trigger node execution:', error);
             this.core.showMessage(`Execution error: ${error.message}`);
@@ -217,15 +310,12 @@ export class AudioAnalyzerNodeIntegration {
         return false;
     }
     
-    // Check if we have connected audio input (no file path)
+    // Check if the node has a connected AUDIO input. Backend execution gives
+    // connected audio priority over audio_file, so preview must not bypass it.
     hasConnectedAudio() {
-        const audioFileWidget = this.core.node.widgets?.find(w => w.name === 'audio_file');
-        const hasFile = audioFileWidget && audioFileWidget.value && audioFileWidget.value.trim();
-        
         if (this.core.node.inputs) {
             const audioInput = this.core.node.inputs.find(input => input.name === 'audio');
-            const hasConnection = audioInput && audioInput.link;
-            return hasConnection && !hasFile;
+            return !!(audioInput && audioInput.link);
         }
         
         return false;

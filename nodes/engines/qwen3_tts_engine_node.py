@@ -1,8 +1,8 @@
 """
 Qwen3-TTS Engine Configuration Node
 
-Provides unified configuration interface for Qwen3-TTS engine with intelligent
-model selection based on voice preset choice (CustomVoice/VoiceDesign/Base).
+Provides one explicit model selector for Qwen3-TTS Base, CustomVoice, and
+VoiceDesign checkpoints.
 """
 
 import os
@@ -29,7 +29,19 @@ BaseTTSNode = base_module.BaseTTSNode
 
 import folder_paths
 from engines.qwen3_asr.prompting import DEFAULT_TRANSLATE_INSTRUCTION_TEMPLATE
+from engines.qwen3_tts.qwen3_tts_downloader import Qwen3TTSDownloader
 from utils.models.extra_paths import get_all_tts_model_paths
+from utils.models.factory_config import (
+    RUNTIME_MODE_DEDICATED,
+    RUNTIME_MODE_MAIN,
+    RUNTIME_MODE_SHARED,
+    normalize_runtime_mode,
+)
+
+
+RUNTIME_MODE_MAIN_LABEL = "Main Environment"
+RUNTIME_MODE_SHARED_LABEL = "⚠️ Shared Runtime"
+RUNTIME_MODE_DEDICATED_LABEL = "⚠️ Dedicated Runtime"
 
 
 class Qwen3TTSEngineNode(BaseTTSNode):
@@ -37,6 +49,82 @@ class Qwen3TTSEngineNode(BaseTTSNode):
     Qwen3-TTS Engine configuration node.
     Unified interface for all 3 model variants (CustomVoice/VoiceDesign/Base).
     """
+
+    LEGACY_MODEL_VALUES = ("1.7B", "0.6B")
+
+    @classmethod
+    def _model_specs(cls):
+        return {
+            name: spec
+            for name, spec in Qwen3TTSDownloader.MODELS.items()
+            if spec.get("role") in {"tts", "voice_design"}
+        }
+
+    @classmethod
+    def _find_local_model(cls, model_name: str) -> str:
+        try:
+            for base_path in get_all_tts_model_paths("TTS"):
+                candidates = (
+                    os.path.join(base_path, "qwen3_tts", model_name),
+                    os.path.join(base_path, "Qwen3-TTS", model_name),
+                    os.path.join(base_path, model_name),
+                )
+                for candidate in candidates:
+                    if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "config.json")):
+                        return f"local:{model_name}"
+        except Exception:
+            pass
+        return ""
+
+    @classmethod
+    def _model_options(cls) -> List[str]:
+        preferred_order = (
+            "Qwen3-TTS-12Hz-1.7B-Base",
+            "Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            "Qwen3-TTS-12Hz-0.6B-Base",
+            "Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        )
+        specs = cls._model_specs()
+        options = []
+        local_options = []
+        for model_name in preferred_order:
+            spec = specs[model_name]
+            options.append(spec["display"])
+            local_model = cls._find_local_model(model_name)
+            if local_model:
+                local_options.append(local_model)
+        options.extend(local_options)
+        # Kept at the end so old API/UI workflows validate long enough to be normalized.
+        options.extend(cls.LEGACY_MODEL_VALUES)
+        return options
+
+    @classmethod
+    def _resolve_model(cls, selected: str, voice_preset: str) -> tuple[str, str, Dict[str, Any]]:
+        specs = cls._model_specs()
+        selected = str(selected or "").strip()
+
+        if selected in cls.LEGACY_MODEL_VALUES:
+            model_type = (
+                "Base"
+                if voice_preset == "None (Zero-shot / Custom)"
+                else "CustomVoice"
+            )
+            model_name = f"Qwen3-TTS-12Hz-{selected}-{model_type}"
+            local = cls._find_local_model(model_name)
+            resolved = local or model_name
+            return resolved, model_name, specs[model_name]
+
+        display_to_name = {spec["display"]: name for name, spec in specs.items()}
+        if selected in display_to_name:
+            model_name = display_to_name[selected]
+            return cls._find_local_model(model_name) or model_name, model_name, specs[model_name]
+
+        model_name = selected.removeprefix("local:")
+        if model_name not in specs:
+            available = ", ".join(spec["display"] for spec in specs.values())
+            raise ValueError(f"Unknown Qwen3-TTS model '{selected}'. Available models: {available}")
+        return selected, model_name, specs[model_name]
 
     @classmethod
     def NAME(cls):
@@ -93,9 +181,9 @@ class Qwen3TTSEngineNode(BaseTTSNode):
         return {
             "required": {
                 # Model Configuration
-                "model_size": (["1.7B", "0.6B"], {
-                    "default": "1.7B",
-                    "tooltip": "Model size:\n• 1.7B: High quality, supports all features (~12GB VRAM)\n• 0.6B: Low VRAM, no instruction support (~6GB VRAM)\nNote: VoiceDesign requires 1.7B (auto-switches)"
+                "model_variant": (cls._model_options(), {
+                    "default": cls._model_options()[0],
+                    "tooltip": "Explicit Qwen3-TTS checkpoint. Local installations use the local: prefix. Base models clone a reference voice, CustomVoice models use preset speakers, and VoiceDesign works only with Voice Designer."
                 }),
                 "device": (["auto", "cuda", "cpu"], {
                     "default": "auto",
@@ -105,7 +193,7 @@ class Qwen3TTSEngineNode(BaseTTSNode):
                 # Voice Control
                 "voice_preset": (voice_presets, {
                     "default": "None (Zero-shot / Custom)",
-                    "tooltip": "Voice selection:\n• None: Zero-shot voice cloning from reference audio (Base model)\n• Preset names: Use hardcoded voices (CustomVoice model)\nModel is auto-selected based on this choice"
+                    "tooltip": "Preset speaker for CustomVoice checkpoints. Ignored by Base and VoiceDesign models."
                 }),
                 "language": (["Auto", "Chinese", "English", "Japanese", "Korean", "German", "French", "Russian", "Portuguese", "Spanish", "Italian"], {
                     "default": "Auto",
@@ -114,7 +202,7 @@ class Qwen3TTSEngineNode(BaseTTSNode):
                 "instruct": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "tooltip": "Instruction for emotion/style/accent control (CustomVoice with presets only):\n• Emotion: 'Speak slowly with sadness', 'Energetic and excited'\n• Accent: 'Speak with Brazilian Portuguese accent'\n• Works best in English instructions\n• LOCKED when:\n  - voice_preset = None (Base model has no instruction)\n  - model_size = 0.6B + preset (0.6B CustomVoice has no instruction)\n• UNLOCKED when: 1.7B + preset selected"
+                    "tooltip": "Delivery instruction for the 1.7B CustomVoice checkpoint. Voice Designer owns the voice description when a VoiceDesign checkpoint is selected, so this field is disabled there. Base and 0.6B CustomVoice models ignore it."
                 }),
 
                 # Generation Parameters
@@ -155,7 +243,7 @@ class Qwen3TTSEngineNode(BaseTTSNode):
                 }),
                 "use_torch_compile": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Enable torch.compile for decoder (~1.5-2x speedup):\n• False: Standard inference (RECOMMENDED - works with all PyTorch versions)\n• True: Compiled decoder (REQUIRES PyTorch 2.10+ and triton-windows 3.6+)\n⚠️ REQUIREMENTS: PyTorch 2.10.0+cu130, triton-windows 3.6.0+\n⚠️ See docs/qwen3_tts_optimizations.md for installation\nFirst generation slower due to compilation, then ~1.5-2x faster"
+                    "tooltip": "Enable torch.compile for decoder (~1.5-2x speedup):\n• False: Standard inference (RECOMMENDED - works with all PyTorch versions)\n• True: Compiled decoder (REQUIRES PyTorch 2.10+ and triton-windows 3.6+)\n⚠️ REQUIREMENTS: PyTorch 2.10.0+cu130, triton-windows 3.6.0+, and Visual Studio C++ Build Tools on Windows\n⚠️ Shared/Dedicated Runtime will try to detect the toolchain automatically, but it still must be installed\n⚠️ See docs/qwen3_tts_optimizations.md for installation\nFirst generation slower due to compilation, then ~1.5-2x faster"
                 }),
                 "use_cuda_graphs": ("BOOLEAN", {
                     "default": False,
@@ -178,6 +266,10 @@ class Qwen3TTSEngineNode(BaseTTSNode):
                     "multiline": True,
                     "tooltip": "Qwen ASR-only experimental translation instruction template for ✏️ ASR Transcribe when task=translate.\n\nThis field shows the actual default instruction used by this integration. Edit it if you want to experiment.\n\nAvailable placeholders:\n• {source_language}: Replaced with the unified ASR source language, or 'the spoken source language' when ASR language is Auto\n• {target_language}: Replaced with this engine node's ASR translation target\n\nImportant:\n• This does NOT affect Qwen TTS generation or the TTS 'instruct' field\n• Qwen translation here is prompt-driven through the ASR wrapper context\n• Results can vary a lot by language pair, and some pairs may not behave reliably at all\n• Weak or malformed custom instructions can produce worse translations or unexpected output"
                 }),
+                "runtime_mode": ([RUNTIME_MODE_MAIN_LABEL, RUNTIME_MODE_SHARED_LABEL, RUNTIME_MODE_DEDICATED_LABEL], {
+                    "default": RUNTIME_MODE_SHARED_LABEL,
+                    "tooltip": "IMPORTANT: Qwen3-TTS is fragile on Transformers 5 in the main environment.\n\nRuntime Isolation:\n• Main Environment: Use the main ComfyUI Python environment\n• Shared Runtime: Use the shared secondary legacy runtime already used by compatible engines\n• Dedicated Runtime: Create a separate secondary runtime just for Qwen3-TTS\n\nWhy this matters:\n• The main ComfyUI env is on Transformers 5\n• Qwen3-TTS is more stable on the legacy Transformers 4 stack\n• Runtime isolation keeps Qwen3-TTS working without downgrading the whole app\n\n⚠️ Shared/Dedicated runtimes currently reuse heavy base packages from the main env (like PyTorch) and install pinned Qwen3-TTS-specific packages on top.\n⚠️ First run may create the secondary runtime and take a while."
+                }),
             }
         }
 
@@ -188,7 +280,7 @@ class Qwen3TTSEngineNode(BaseTTSNode):
 
     def create_engine_config(
         self,
-        model_size: str,
+        model_variant: str,
         device: str,
         voice_preset: str,
         language: str,
@@ -198,6 +290,7 @@ class Qwen3TTSEngineNode(BaseTTSNode):
         temperature: float,
         repetition_penalty: float,
         max_new_tokens: int,
+        runtime_mode: str = RUNTIME_MODE_SHARED_LABEL,
         dtype: str = "auto",
         attn_implementation: str = "auto",
         x_vector_only_mode: bool = False,
@@ -214,16 +307,40 @@ class Qwen3TTSEngineNode(BaseTTSNode):
         Returns:
             Tuple containing engine config dict
         """
-        # Create engine config dict
-        # NOTE: model_path is NOT included - adapter determines correct model variant automatically
-        # based on voice_preset and model_size (CustomVoice/VoiceDesign/Base)
+        runtime_mode = normalize_runtime_mode(runtime_mode)
+        if runtime_mode == RUNTIME_MODE_SHARED:
+            runtime_profile = "vibevoice_transformers4_shared"
+        elif runtime_mode == RUNTIME_MODE_DEDICATED:
+            runtime_profile = "qwen3_tts_transformers4_dedicated"
+        else:
+            runtime_profile = None
+
+        resolved_model, model_name, model_spec = self._resolve_model(model_variant, voice_preset)
+        model_type = model_spec["model_type"]
+        model_size = model_spec["model_size"]
+        model_role = model_spec["role"]
+
+        if model_type == "CustomVoice" and voice_preset == "None (Zero-shot / Custom)":
+            raise ValueError(
+                "The selected Qwen CustomVoice model requires a preset speaker. "
+                "Choose Vivian, Serena, or another preset in the Qwen3-TTS Engine."
+            )
+        effective_voice_preset = (
+            voice_preset if model_type == "CustomVoice" else "None (Zero-shot / Custom)"
+        )
+
         engine_config = {
             "engine_type": "qwen3_tts",
+            "model_variant": resolved_model,
+            "model_name": model_name,
+            "model_path": resolved_model,
+            "model_type": model_type,
+            "model_role": model_role,
             "model_size": model_size,
             "device": device,
             "dtype": dtype,
             "attn_implementation": attn_implementation,
-            "voice_preset": voice_preset,
+            "voice_preset": effective_voice_preset,
             "language": language,
             "instruct": instruct,
             "top_k": top_k,
@@ -231,6 +348,8 @@ class Qwen3TTSEngineNode(BaseTTSNode):
             "temperature": temperature,
             "repetition_penalty": repetition_penalty,
             "max_new_tokens": max_new_tokens,
+            "runtime_mode": runtime_mode,
+            "runtime_profile": runtime_profile,
             "x_vector_only_mode": x_vector_only_mode,
             "use_torch_compile": use_torch_compile,
             "use_cuda_graphs": use_cuda_graphs,
@@ -242,8 +361,14 @@ class Qwen3TTSEngineNode(BaseTTSNode):
 
         # Print configuration summary (matching other engines)
         print(f"⚙️ Qwen3-TTS: Configured on {device}")
-        print(f"   Model: {model_size} | Language: {language}")
-        print(f"   Settings: voice_preset={voice_preset}, temperature={temperature}, top_k={top_k}, top_p={top_p}")
+        print(f"   Model: {resolved_model} | Role: {model_role} | Language: {language}")
+        runtime_label = {
+            RUNTIME_MODE_MAIN: "Main Environment",
+            RUNTIME_MODE_SHARED: "Shared Runtime",
+            RUNTIME_MODE_DEDICATED: "Dedicated Runtime",
+        }.get(runtime_mode, runtime_mode)
+        print(f"   Runtime: {runtime_label}")
+        print(f"   Settings: voice_preset={effective_voice_preset}, temperature={temperature}, top_k={top_k}, top_p={top_p}")
         print(f"   Advanced: repetition_penalty={repetition_penalty}, max_tokens={max_new_tokens}, x_vector_only={x_vector_only_mode}")
         custom_asr_translate_instruction = (
             engine_config["asr_translate_instruction_override"] != DEFAULT_TRANSLATE_INSTRUCTION_TEMPLATE
@@ -257,12 +382,14 @@ class Qwen3TTSEngineNode(BaseTTSNode):
             print(f"   Optimizations: torch.compile={use_torch_compile}, cuda_graphs={use_cuda_graphs}, mode={compile_mode}")
         if instruct:
             print(f"   Instruction: {instruct[:50]}..." if len(instruct) > 50 else f"   Instruction: {instruct}")
+        if runtime_mode != RUNTIME_MODE_MAIN:
+            print("   ⚠️ Runtime isolation requested: first run may create a secondary Qwen3-TTS runtime.")
 
         # Return in the same structure as other engines (nested config)
         engine_data = {
             "engine_type": "qwen3_tts",
             "config": engine_config,
-            "capabilities": ["tts", "asr"]
+            "capabilities": [model_role, "asr"]
         }
 
         return (engine_data,)

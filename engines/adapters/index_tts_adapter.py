@@ -13,6 +13,7 @@ from engines.index_tts.index_tts import IndexTTSEngine
 from engines.index_tts.index_tts_downloader import index_tts_downloader
 from utils.text.character_parser import character_parser
 from utils.voice.discovery import get_character_mapping, get_available_characters
+from utils.voice.character_logging import resolved_character_label
 from utils.audio.cache import get_audio_cache
 
 
@@ -76,6 +77,25 @@ class IndexTTSAdapter:
         )
         
     
+    @staticmethod
+    def _normalize_emotion_audio(emotion_audio):
+        """Return a path or waveform dict accepted by IndexTTS-2."""
+        if not isinstance(emotion_audio, dict):
+            return emotion_audio
+        if emotion_audio.get("audio_path"):
+            print(
+                "🎭 Using Character Voices emotion audio: "
+                f"{emotion_audio.get('character_name', 'unknown')} -> "
+                f"{emotion_audio['audio_path']}"
+            )
+            return emotion_audio["audio_path"]
+        if "waveform" in emotion_audio:
+            return emotion_audio
+        nested_audio = emotion_audio.get("audio")
+        if isinstance(nested_audio, dict) and "waveform" in nested_audio:
+            return nested_audio
+        return emotion_audio
+
     def generate(self,
                 text: str,
                 speaker_audio: Optional[str] = None,
@@ -95,6 +115,9 @@ class IndexTTSAdapter:
                 num_beams: int = 3,
                 repetition_penalty: float = 10.0,
                 max_mel_tokens: int = 1500,
+                language: str = "English",
+                duration_factor: float = 1.0,
+                text_normalization: bool = True,
                 # Streaming parameters
                 stream_return: bool = False,
                 more_segment_before: int = 0,
@@ -120,6 +143,9 @@ class IndexTTSAdapter:
             num_beams: Number of beams for beam search
             repetition_penalty: Repetition penalty
             max_mel_tokens: Maximum mel tokens to generate
+            language: IndexTTS-2.5 language code/name
+            duration_factor: Official 2.5 internal feature-duration multiplier
+            text_normalization: Enable multilingual text normalization
             **kwargs: Additional parameters
             
         Returns:
@@ -137,7 +163,29 @@ class IndexTTSAdapter:
             
             if len(processed_segments) > 1:
                 # Multi-segment character switching - process each segment separately
-                return self._generate_multi_character_segments(processed_segments, speaker_audio, emotion_audio, **kwargs)
+                return self._generate_multi_character_segments(
+                    processed_segments, speaker_audio, emotion_audio,
+                    emotion_alpha=emotion_alpha,
+                    emotion_vector=emotion_vector,
+                    use_emotion_text=use_emotion_text,
+                    emotion_text=emotion_text,
+                    use_random=use_random,
+                    interval_silence=interval_silence,
+                    max_text_tokens_per_segment=max_text_tokens_per_segment,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    length_penalty=length_penalty,
+                    num_beams=num_beams,
+                    repetition_penalty=repetition_penalty,
+                    max_mel_tokens=max_mel_tokens,
+                    language=language,
+                    duration_factor=duration_factor,
+                    text_normalization=text_normalization,
+                    stream_return=stream_return,
+                    more_segment_before=more_segment_before,
+                    **kwargs,
+                )
             elif processed_segments:
                 # Single character segment
                 first_segment = processed_segments[0]
@@ -157,19 +205,10 @@ class IndexTTSAdapter:
         # Determine final speaker and emotion audio
         final_speaker_audio = speaker_audio
 
-        # Handle Character Voices emotion_audio format
-        if emotion_audio and isinstance(emotion_audio, dict):
-            if "audio_path" in emotion_audio:
-                # Character Voices format: {'audio': {...}, 'audio_path': 'path', ...}
-                final_emotion_audio = emotion_audio["audio_path"]
-                print(f"🎭 Using Character Voices emotion audio: {emotion_audio.get('character_name', 'unknown')} -> {final_emotion_audio}")
-            elif "waveform" in emotion_audio:
-                # Direct AUDIO format: {'waveform': tensor, 'sample_rate': rate}
-                final_emotion_audio = emotion_audio
-            else:
-                final_emotion_audio = emotion_audio
-        else:
-            final_emotion_audio = emotion_audio
+        # Normalize the two supported audio-reference shapes:
+        # Character Voices returns {audio: {waveform, sample_rate}, audio_path: ...},
+        # while ComfyUI AUDIO returns {waveform, sample_rate} directly.
+        final_emotion_audio = self._normalize_emotion_audio(emotion_audio)
         
         # Only do character mapping if we actually have character tags
         if has_character_tags:
@@ -223,6 +262,9 @@ class IndexTTSAdapter:
             max_mel_tokens=max_mel_tokens,
             max_text_tokens_per_segment=max_text_tokens_per_segment,
             interval_silence=interval_silence,
+            language=language,
+            duration_factor=duration_factor,
+            text_normalization=text_normalization,
             stream_return=stream_return,
             more_segment_before=more_segment_before,
             **kwargs  # Include seed and other kwargs in cache key
@@ -263,18 +305,11 @@ class IndexTTSAdapter:
         engine_kwargs['stream_return'] = stream_return
         engine_kwargs['more_segment_before'] = more_segment_before
 
-        # Apply consistent emotion priority: emotion_audio takes precedence over other emotion controls
-        # This ensures consistent behavior whether using character tags or direct engine inputs
-        if final_emotion_audio:
-            # emotion_audio connected - disable other emotion controls
-            final_emotion_vector = None
-            final_use_emotion_text = False
-            final_emotion_text = None
-        else:
-            # No emotion_audio - use provided emotion controls
-            final_emotion_vector = emotion_vector
-            final_use_emotion_text = use_emotion_text
-            final_emotion_text = emotion_text
+        # Audio emotion and vector/text emotion are independent conditioning
+        # sources.  IndexTTS-2 blends them in its latent emotion space.
+        final_emotion_vector = emotion_vector
+        final_use_emotion_text = use_emotion_text
+        final_emotion_text = emotion_text
 
         # Generate audio with OOM protection
         try:
@@ -296,6 +331,9 @@ class IndexTTSAdapter:
                 num_beams=num_beams,
                 repetition_penalty=repetition_penalty,
                 max_mel_tokens=max_mel_tokens,
+                language=language,
+                duration_factor=duration_factor,
+                text_normalization=text_normalization,
                 **engine_kwargs
             )
         except torch.OutOfMemoryError as e:
@@ -391,12 +429,22 @@ class IndexTTSAdapter:
         if unique_characters:
             character_mapping = get_character_mapping(list(unique_characters), engine_type="index_tts")
         
-        print(f"🎭 IndexTTS-2: Processing {len(segments)} character segment(s) - {', '.join([s.get('character', 'narrator') for s in segments])}")
+        resolved_names = [
+            resolved_character_label(
+                segment.get('character', 'narrator'),
+                character_mapping.get(segment.get('character', 'narrator'), (default_speaker_audio, None)),
+            )
+            for segment in segments
+        ]
+        print(f"🎭 IndexTTS-2: Processing {len(segments)} character segment(s) - {', '.join(resolved_names)}")
         
         for segment in segments:
             character_name = segment.get('character', 'narrator')
             segment_text = segment.get('text', '').strip()
             emotion_ref = segment.get('emotion')
+            segment_kwargs = dict(kwargs)
+            if segment.get('language'):
+                segment_kwargs['language'] = segment['language']
             
             if not segment_text:
                 continue
@@ -407,7 +455,7 @@ class IndexTTSAdapter:
                 character_audio_path = character_mapping[character_name][0]
                 if character_audio_path:
                     speaker_audio = character_audio_path
-                    print(f"📖 Using character voice '{character_name}' | Ref: '{speaker_audio}'")
+                    print(f"📖 Using character voice '{resolved_character_label(character_name, speaker_audio)}' | Ref: '{speaker_audio}'")
                 else:
                     print(f"⚠️ Character '{character_name}' has no audio reference, using default")
             
@@ -424,13 +472,13 @@ class IndexTTSAdapter:
                 text=segment_text,
                 speaker_audio=speaker_audio,
                 emotion_audio=emotion_audio,
-                **kwargs
+                **segment_kwargs
             )
 
             # Check cache first
             cached_segment_audio = self.audio_cache.get_cached_audio(segment_cache_key)
             if cached_segment_audio:
-                print(f"💾 Using cached IndexTTS-2 segment for '{character_name}': '{segment_text[:30]}...'")
+                print(f"💾 Using cached IndexTTS-2 segment for '{resolved_character_label(character_name, speaker_audio)}': '{segment_text[:30]}...'")
                 segment_audio = cached_segment_audio[0]
             else:
                 # Generate audio for this segment with OOM protection
@@ -439,7 +487,7 @@ class IndexTTSAdapter:
                         text=segment_text,
                         speaker_audio=speaker_audio,
                         emotion_audio=emotion_audio,
-                        **kwargs
+                        **segment_kwargs
                     )
                 except torch.OutOfMemoryError as e:
                     # Analyze audio after OOM in multi-character segments
@@ -465,7 +513,16 @@ class IndexTTSAdapter:
     
     def _generate_cache_key(self, **params) -> str:
         """Generate cache key for IndexTTS-2."""
-        return self.audio_cache.generate_cache_key('index_tts', **params)
+        model_identity = {}
+        if self.engine is not None:
+            model_identity = {
+                "model_name": getattr(self.engine, "model_name", None),
+                "model_version": getattr(self.engine, "model_version", None),
+                "model_path": getattr(self.engine, "model_dir", None),
+            }
+        return self.audio_cache.generate_cache_key(
+            'index_tts', **model_identity, **params
+        )
 
     def _analyze_audio_after_oom(self, speaker_audio: str, emotion_audio: str, max_mel_tokens: int) -> str:
         """
@@ -543,6 +600,8 @@ class IndexTTSAdapter:
 
         # Use our centralized audio hashing utility
         from utils.audio.audio_hash import generate_stable_audio_component
+        if isinstance(audio_path, dict):
+            return generate_stable_audio_component(reference_audio=audio_path)
         return generate_stable_audio_component(audio_file_path=audio_path)
     
     def get_supported_formats(self) -> List[str]:
@@ -583,7 +642,3 @@ class IndexTTSAdapter:
         if self.engine:
             self.engine.unload()
             self.engine = None
-    
-    def __del__(self):
-        """Cleanup on deletion."""
-        self.unload()

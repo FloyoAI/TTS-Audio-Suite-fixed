@@ -13,6 +13,8 @@ from engines.training.base_handler import BaseTrainingHandler, unpack_tts_engine
 _HANDLERS: Dict[str, Type[BaseTrainingHandler]] = {}
 _HANDLER_MODULES = {
     "rvc": "engines.rvc.training.handler",
+    "moss_tts": "engines.moss_tts.training.handler",
+    "dramabox": "engines.dramabox.training.handler",
 }
 
 

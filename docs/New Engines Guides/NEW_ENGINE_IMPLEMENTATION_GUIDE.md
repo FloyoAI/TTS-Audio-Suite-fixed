@@ -312,6 +312,8 @@ from utils.downloads.unified_downloader import UnifiedDownloader
 
 **File:** `nodes/engines/[engine_name]_engine_node.py`
 
+**Model dropdown rule:** Always keep canonical/downloadable model choices visible and add detected installations as separate `local:ModelName` choices; selecting a canonical choice should reuse its organized local installation when available, not replace or hide either choice.
+
 ### Phase 2: Unified Systems Integration
 
 #### Step 5: Integrate with Unified Model Loading
@@ -466,6 +468,7 @@ Also to test, requirements and dependencies need to be added.
 - [ ] Model auto-download works
 - [ ] VRAM management works (model unloads)
 - [ ] Different parameter combinations work
+- [ ] Engine prints a standard `Settings:` summary with the active generation/load parameters
 - [ ] **Interrupt handling works** - User can stop SRT generation and it stops within ~1 segment
 
 ### Phase 4: SRT Implementation

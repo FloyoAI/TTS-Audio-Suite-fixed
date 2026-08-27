@@ -41,9 +41,11 @@ class TextEncoder256(nn.Module):
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
     def forward(self, phone, pitch, lengths):
-        if pitch == None:
+        phone = phone.to(dtype=self.emb_phone.weight.dtype)
+        if pitch is None:
             x = self.emb_phone(phone)
         else:
+            pitch = pitch.to(dtype=torch.long)
             x = self.emb_phone(phone) + self.emb_pitch(pitch)
         x = x * math.sqrt(self.hidden_channels)  # [b, t, h]
         x = self.lrelu(x)
@@ -88,9 +90,11 @@ class TextEncoder768(nn.Module):
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
     def forward(self, phone, pitch, lengths):
+        phone = phone.to(dtype=self.emb_phone.weight.dtype)
         if pitch is None:
             x = self.emb_phone(phone)
         else:
+            pitch = pitch.to(dtype=torch.long)
             x = self.emb_phone(phone) + self.emb_pitch(pitch)
         x = x * math.sqrt(self.hidden_channels)  # [b, t, h]
         x = self.lrelu(x)
@@ -103,6 +107,33 @@ class TextEncoder768(nn.Module):
 
         m, logs = torch.split(stats, self.out_channels, dim=1)
         return m, logs, x_mask
+
+
+# TTS Audio Suite patch: HuBERT Large produces 1024-dim features, so RVC needs
+# an explicitly matching input projection instead of silently using the 768-dim encoder.
+class TextEncoder1024(TextEncoder768):
+    def __init__(
+        self,
+        out_channels,
+        hidden_channels,
+        filter_channels,
+        n_heads,
+        n_layers,
+        kernel_size,
+        p_dropout,
+        f0=True,
+    ):
+        super().__init__(
+            out_channels,
+            hidden_channels,
+            filter_channels,
+            n_heads,
+            n_layers,
+            kernel_size,
+            p_dropout,
+            f0=f0,
+        )
+        self.emb_phone = nn.Linear(1024, hidden_channels)
 
 class TextEncoder(nn.Module):
   def __init__(self,
@@ -809,6 +840,22 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
         return o, x_mask, (z, z_p, m_p, logs_p)
 
 
+# TTS Audio Suite patch: preserve the standard RVC v2 architecture while
+# replacing only its HuBERT input projection for correctly trained 1024-dim models.
+class SynthesizerTrnMs1024NSFsid(SynthesizerTrnMs768NSFsid):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enc_p = TextEncoder1024(
+            self.inter_channels,
+            self.hidden_channels,
+            self.filter_channels,
+            self.n_heads,
+            self.n_layers,
+            self.kernel_size,
+            self.p_dropout,
+        )
+
+
 class SynthesizerTrnMs256NSFsid_nono(nn.Module):
     def __init__(
         self,
@@ -1019,6 +1066,22 @@ class SynthesizerTrnMs768NSFsid_nono(nn.Module):
         z = self.flow(z_p, x_mask, g=g, reverse=True)
         o = self.dec(z * x_mask, g=g)
         return o, x_mask, (z, z_p, m_p, logs_p)
+
+
+# TTS Audio Suite patch: non-F0 RVC v2 counterpart for 1024-dim HuBERT features.
+class SynthesizerTrnMs1024NSFsid_nono(SynthesizerTrnMs768NSFsid_nono):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enc_p = TextEncoder1024(
+            self.inter_channels,
+            self.hidden_channels,
+            self.filter_channels,
+            self.n_heads,
+            self.n_layers,
+            self.kernel_size,
+            self.p_dropout,
+            f0=False,
+        )
 
 
 class MultiPeriodDiscriminator(torch.nn.Module):

@@ -141,6 +141,72 @@ class HiggsAudioCacheKeyGenerator(CacheKeyGenerator):
         return hashlib.md5(cache_string.encode()).hexdigest()
 
 
+class HiggsAudioV3CacheKeyGenerator(CacheKeyGenerator):
+    """Cache key generator for Higgs Audio v3 engine."""
+
+    def generate_cache_key(self, **params) -> str:
+        temperature = params.get('temperature', 1.0)
+        top_p = params.get('top_p', 0.95)
+
+        if isinstance(temperature, (int, float)):
+            temperature = round(float(temperature), 3)
+        if isinstance(top_p, (int, float)):
+            top_p = round(float(top_p), 3)
+
+        cache_data = {
+            'text': params.get('text', ''),
+            'audio_component': params.get('audio_component', ''),
+            'reference_text': params.get('reference_text', ''),
+            'model_variant': params.get('model_variant', 'higgs-audio-v3-tts-4b'),
+            'temperature': temperature,
+            'top_p': top_p,
+            'top_k': params.get('top_k', 50),
+            'max_new_tokens': params.get('max_new_tokens', 2048),
+            'seed': params.get('seed', 0),
+            'device': params.get('device', 'auto'),
+            'dtype': params.get('dtype', 'auto'),
+            'attention': params.get('attention', 'auto'),
+            'character': params.get('character', 'narrator'),
+            'engine': 'higgs_audio_v3',
+        }
+
+        cache_string = str(sorted(cache_data.items()))
+        return hashlib.md5(cache_string.encode()).hexdigest()
+
+
+class HiggsAudioV3CacheKeyGenerator(CacheKeyGenerator):
+    """Cache key generator for Higgs Audio v3 engine."""
+
+    def generate_cache_key(self, **params) -> str:
+        temperature = params.get('temperature', 1.0)
+        top_p = params.get('top_p', 0.95)
+
+        if isinstance(temperature, (int, float)):
+            temperature = round(float(temperature), 3)
+        if isinstance(top_p, (int, float)):
+            top_p = round(float(top_p), 3)
+
+        cache_data = {
+            'text': params.get('text', ''),
+            'audio_component': params.get('audio_component', ''),
+            'reference_text': params.get('reference_text', ''),
+            'model_variant': params.get('model_variant', 'higgs-audio-v3-tts-4b'),
+            'temperature': temperature,
+            'top_p': top_p,
+            'top_k': params.get('top_k', 50),
+            'max_new_tokens': params.get('max_new_tokens', 2048),
+            'seed': params.get('seed', 0),
+            'device': params.get('device', 'auto'),
+            'dtype': params.get('dtype', 'auto'),
+            'attention': params.get('attention', 'auto'),
+            'character': params.get('character', 'narrator'),
+            'engine': 'higgs_audio_v3',
+        }
+
+        cache_string = str(sorted(cache_data.items()))
+        return hashlib.md5(cache_string.encode()).hexdigest()
+
+
 class VibeVoiceCacheKeyGenerator(CacheKeyGenerator):
     """Cache key generator for VibeVoice engine."""
     
@@ -250,6 +316,11 @@ class IndexTTSCacheKeyGenerator(CacheKeyGenerator):
             'max_text_tokens_per_segment': params.get('max_text_tokens_per_segment', 120),
             'interval_silence': params.get('interval_silence', 200),
             'model_name': params.get('model_name', 'IndexTTS-2'),
+            'model_version': params.get('model_version', '2'),
+            'model_path': params.get('model_path', ''),
+            'language': params.get('language', 'English'),
+            'duration_factor': round(float(params.get('duration_factor', 1.0)), 4),
+            'text_normalization': params.get('text_normalization', True),
             'device': params.get('device', 'auto'),
             'character': params.get('character', 'narrator'),
             'use_torch_compile': params.get('use_torch_compile', False),  # Optimization may affect output precision
@@ -347,6 +418,73 @@ class Qwen3TTSCacheKeyGenerator(CacheKeyGenerator):
         return hashlib.md5(cache_string.encode()).hexdigest()
 
 
+class MossTTSCacheKeyGenerator(CacheKeyGenerator):
+    """Cache key generator for MOSS-TTS engine."""
+
+    def generate_cache_key(self, **params) -> str:
+        audio_temperature = params.get('audio_temperature', params.get('temperature', 1.0))
+        audio_top_p = params.get('audio_top_p', params.get('top_p', 0.95))
+        audio_repetition_penalty = params.get(
+            'audio_repetition_penalty',
+            params.get('repetition_penalty', 1.1)
+        )
+
+        if isinstance(audio_temperature, (int, float)):
+            audio_temperature = round(float(audio_temperature), 3)
+        if isinstance(audio_top_p, (int, float)):
+            audio_top_p = round(float(audio_top_p), 3)
+        if isinstance(audio_repetition_penalty, (int, float)):
+            audio_repetition_penalty = round(float(audio_repetition_penalty), 3)
+
+        cache_data = {
+            'text': params.get('text', ''),
+            'audio_component': params.get('audio_component', ''),
+            'model_variant': params.get('model_variant', 'MOSS-TTS-Local-Transformer'),
+            'lora_adapter': params.get('lora_adapter'),
+            'language': params.get('language', 'auto'),
+            'instruction': params.get('instruction'),
+            'quality': params.get('quality'),
+            'sound_event': params.get('sound_event'),
+            'ambient_sound': params.get('ambient_sound'),
+            'duration_tokens': params.get('duration_tokens'),
+            'audio_temperature': audio_temperature,
+            'audio_top_p': audio_top_p,
+            'audio_top_k': params.get('audio_top_k', params.get('top_k', 50)),
+            'audio_repetition_penalty': audio_repetition_penalty,
+            'max_new_tokens': params.get('max_new_tokens', 4096),
+            'n_vq_for_inference': params.get('n_vq_for_inference'),
+            'seed': params.get('seed', 0),
+            'device': params.get('device', 'auto'),
+            'dtype': params.get('dtype', 'auto'),
+            'attn_implementation': params.get('attn_implementation', 'auto'),
+            'character': params.get('character', 'narrator'),
+            'engine': 'moss_tts',
+        }
+
+        cache_string = str(sorted(cache_data.items()))
+        return hashlib.md5(cache_string.encode()).hexdigest()
+
+
+class MossSoundEffectV2CacheKeyGenerator(CacheKeyGenerator):
+    """Cache all controls that materially affect MOSS-SoundEffect v2 output."""
+
+    def generate_cache_key(self, **params) -> str:
+        cache_data = {
+            "description": params.get("description", ""),
+            "model": params.get("model", "MOSS-SoundEffect-v2.0"),
+            "duration_seconds": round(float(params.get("duration_seconds", 10.0)), 1),
+            "inference_steps": int(params.get("inference_steps", 100)),
+            "cfg_scale": round(float(params.get("cfg_scale", 4.0)), 3),
+            "sigma_shift": round(float(params.get("sigma_shift", 5.0)), 3),
+            "negative_prompt": params.get("negative_prompt", ""),
+            "seed": int(params.get("seed", 0)),
+            "dtype": params.get("dtype", "auto"),
+            "device": params.get("device", "auto"),
+            "engine": "moss_soundeffect_v2",
+        }
+        return hashlib.md5(str(sorted(cache_data.items())).encode()).hexdigest()
+
+
 class EchoTTSCacheKeyGenerator(CacheKeyGenerator):
     """Cache key generator for Echo-TTS engine."""
 
@@ -408,6 +546,162 @@ class EchoTTSCacheKeyGenerator(CacheKeyGenerator):
         return hashlib.md5(cache_string.encode()).hexdigest()
 
 
+class DotsTTSCacheKeyGenerator(CacheKeyGenerator):
+    """Cache key generator for Dots TTS engine."""
+
+    def generate_cache_key(self, **params) -> str:
+        guidance_scale = params.get('guidance_scale', 1.2)
+        speaker_scale = params.get('speaker_scale', 1.5)
+
+        if isinstance(guidance_scale, (int, float)):
+            guidance_scale = round(float(guidance_scale), 3)
+        if isinstance(speaker_scale, (int, float)):
+            speaker_scale = round(float(speaker_scale), 3)
+
+        cache_data = {
+            'text': params.get('text', ''),
+            'audio_component': params.get('audio_component', ''),
+            'prompt_text': params.get('prompt_text', ''),
+            'model_variant': params.get('model_variant', 'dots.tts-soar'),
+            'language': params.get('language', 'auto_detect'),
+            'template_name': params.get('template_name', 'tts'),
+            'num_steps': params.get('num_steps', 10),
+            'guidance_scale': guidance_scale,
+            'speaker_scale': speaker_scale,
+            'normalize_text': params.get('normalize_text', False),
+            'max_generate_length': params.get('max_generate_length', 500),
+            'precision': params.get('precision', 'auto'),
+            'optimize': params.get('optimize', False),
+            'seed': params.get('seed', 0),
+            'device': params.get('device', 'auto'),
+            'character': params.get('character', 'narrator'),
+            'engine': 'dots_tts',
+        }
+
+        cache_string = str(sorted(cache_data.items()))
+        return hashlib.md5(cache_string.encode()).hexdigest()
+
+
+class DramaBoxCacheKeyGenerator(CacheKeyGenerator):
+    """Cache key generator for official DramaBox inference."""
+
+    def generate_cache_key(self, **params) -> str:
+        cache_data = {
+            'text': params.get('text', ''),
+            'audio_component': params.get('audio_component', ''),
+            'model_name': params.get('model_name', 'DramaBox'),
+            'cfg_scale': round(float(params.get('cfg_scale', 2.5)), 3),
+            'stg_scale': round(float(params.get('stg_scale', 1.5)), 3),
+            'duration_multiplier': round(float(params.get('duration_multiplier', 1.1)), 3),
+            'gen_duration': round(float(params.get('gen_duration', 0.0)), 3),
+            'ref_duration': round(float(params.get('ref_duration', 10.0)), 3),
+            'rescale_scale': params.get('rescale_scale', 'auto'),
+            'watermark': bool(params.get('watermark', False)),
+            'prompt_template': params.get('prompt_template', '"{seg}"'),
+            'negative_prompt': params.get('negative_prompt', ''),
+            'precision': params.get('precision', 'auto'),
+            'transformer_quantization': params.get('transformer_quantization', 'none'),
+            'memory_mode': params.get('memory_mode', 'fast'),
+            'compile_model': bool(params.get('compile_model', False)),
+            'lora_path': params.get('lora_path', ''),
+            'lora_strength': round(float(params.get('lora_strength', 1.0)), 4),
+            'lora_revision': params.get('lora_revision', ''),
+            'seed': params.get('seed', 42),
+            'character': params.get('character', 'narrator'),
+            'engine': 'dramabox',
+        }
+        return hashlib.md5(str(sorted(cache_data.items())).encode()).hexdigest()
+
+
+class FishAudioS2CacheKeyGenerator(CacheKeyGenerator):
+    """Cache key generator for Fish Audio S2 Pro."""
+
+    def generate_cache_key(self, **params) -> str:
+        cache_data = {
+            'text': params.get('text', ''),
+            'audio_component': params.get('audio_component', ''),
+            'reference_text': params.get('reference_text', ''),
+            'model_variant': params.get('model_variant', 's2-pro'),
+            'quantization': params.get('quantization', 'none'),
+            'multi_speaker_mode': params.get('multi_speaker_mode', 'Native Multi-Speaker'),
+            'temperature': round(float(params.get('temperature', 0.8)), 3),
+            'top_p': round(float(params.get('top_p', 0.8)), 3),
+            'repetition_penalty': round(float(params.get('repetition_penalty', 1.1)), 3),
+            'chunk_length': params.get('chunk_length', 200),
+            'max_new_tokens': params.get('max_new_tokens', 1024),
+            'context_length': params.get('context_length', 8192),
+            'normalize': params.get('normalize', True),
+            'seed': params.get('seed', 0),
+            'character': params.get('character', 'narrator'),
+            'engine': 'fish_audio_s2',
+        }
+
+        cache_string = str(sorted(cache_data.items()))
+        return hashlib.md5(cache_string.encode()).hexdigest()
+
+
+class OmniVoiceCacheKeyGenerator(CacheKeyGenerator):
+    """Cache key generator for OmniVoice engine."""
+
+    def generate_cache_key(self, **params) -> str:
+        guidance_scale = params.get('guidance_scale', 2.0)
+        t_shift = params.get('t_shift', 0.1)
+        speed = params.get('speed', 1.0)
+        duration = params.get('duration', 'auto')
+        layer_penalty_factor = params.get('layer_penalty_factor', 5.0)
+        position_temperature = params.get('position_temperature', 5.0)
+        class_temperature = params.get('class_temperature', 0.0)
+        audio_chunk_duration = params.get('audio_chunk_duration', 15.0)
+        audio_chunk_threshold = params.get('audio_chunk_threshold', 30.0)
+
+        rounded_fields = {
+            'guidance_scale': guidance_scale,
+            't_shift': t_shift,
+            'speed': speed,
+            'layer_penalty_factor': layer_penalty_factor,
+            'position_temperature': position_temperature,
+            'class_temperature': class_temperature,
+            'audio_chunk_duration': audio_chunk_duration,
+            'audio_chunk_threshold': audio_chunk_threshold,
+        }
+        for key, value in list(rounded_fields.items()):
+            if isinstance(value, (int, float)):
+                rounded_fields[key] = round(float(value), 3)
+
+        if isinstance(duration, (int, float)):
+            duration = round(float(duration), 3)
+
+        cache_data = {
+            'text': params.get('text', ''),
+            'audio_component': params.get('audio_component', ''),
+            'prompt_text': params.get('prompt_text', ''),
+            'model_variant': params.get('model_variant', 'OmniVoice'),
+            'language': params.get('language', 'none'),
+            'instruct': params.get('instruct', ''),
+            'num_step': params.get('num_step', 32),
+            'guidance_scale': rounded_fields['guidance_scale'],
+            't_shift': rounded_fields['t_shift'],
+            'speed': rounded_fields['speed'],
+            'duration': duration,
+            'layer_penalty_factor': rounded_fields['layer_penalty_factor'],
+            'position_temperature': rounded_fields['position_temperature'],
+            'class_temperature': rounded_fields['class_temperature'],
+            'denoise': params.get('denoise', True),
+            'preprocess_prompt': params.get('preprocess_prompt', True),
+            'postprocess_output': params.get('postprocess_output', True),
+            'audio_chunk_duration': rounded_fields['audio_chunk_duration'],
+            'audio_chunk_threshold': rounded_fields['audio_chunk_threshold'],
+            'dtype': params.get('dtype', 'auto'),
+            'device': params.get('device', 'auto'),
+            'seed': params.get('seed', 0),
+            'character': params.get('character', 'narrator'),
+            'engine': 'omnivoice',
+        }
+
+        cache_string = str(sorted(cache_data.items()))
+        return hashlib.md5(cache_string.encode()).hexdigest()
+
+
 class AudioCache:
     """Unified audio cache manager for all TTS engines."""
     
@@ -417,11 +711,18 @@ class AudioCache:
             'chatterbox': ChatterBoxCacheKeyGenerator(),
             'chatterbox_official_23lang': ChatterBoxOfficial23LangCacheKeyGenerator(),  # Uses specialized generator with advanced params
             'higgs_audio': HiggsAudioCacheKeyGenerator(),
+            'higgs_audio_v3': HiggsAudioV3CacheKeyGenerator(),
             'vibevoice': VibeVoiceCacheKeyGenerator(),
             'step_audio_editx': StepAudioEditXCacheKeyGenerator(),
             'index_tts': IndexTTSCacheKeyGenerator(),
             'cosyvoice': CosyVoiceCacheKeyGenerator(),
             'qwen3_tts': Qwen3TTSCacheKeyGenerator(),
+            'dots_tts': DotsTTSCacheKeyGenerator(),
+            'dramabox': DramaBoxCacheKeyGenerator(),
+            'fish_audio_s2': FishAudioS2CacheKeyGenerator(),
+            'omnivoice': OmniVoiceCacheKeyGenerator(),
+            'moss_tts': MossTTSCacheKeyGenerator(),
+            'moss_soundeffect_v2': MossSoundEffectV2CacheKeyGenerator(),
             'echo_tts': EchoTTSCacheKeyGenerator()
         }
     
@@ -493,7 +794,9 @@ class AudioCache:
             num_samples = audio_tensor.numel()
 
         # Use engine-specific sample rates
-        if engine_type in ('f5tts', 'step_audio_editx', 'qwen3_tts'):
+        if engine_type in ('dots_tts', 'dramabox', 'moss_soundeffect_v2'):
+            sample_rate = 48000
+        elif engine_type in ('f5tts', 'step_audio_editx', 'qwen3_tts', 'moss_tts', 'higgs_audio_v3', 'omnivoice'):
             sample_rate = 24000
         elif engine_type in ('index_tts', 'cosyvoice'):
             sample_rate = 22050

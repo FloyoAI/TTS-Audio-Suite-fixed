@@ -163,7 +163,7 @@ def _simple_energy_trim(audio, top_db=30):
     return audio[start_idx:end_idx]
 
 
-def safe_mel_filters(sr, n_fft, n_mels=80, fmin=0.0, fmax=None):
+def safe_mel_filters(sr, n_fft, n_mels=80, fmin=0.0, fmax=None, **kwargs):
     """
     Safe mel filter bank creation with librosa fallback to torchaudio
     
@@ -173,6 +173,7 @@ def safe_mel_filters(sr, n_fft, n_mels=80, fmin=0.0, fmax=None):
         n_mels: Number of mel bands
         fmin: Minimum frequency
         fmax: Maximum frequency
+        **kwargs: Extra librosa.filters.mel options such as htk, norm, and dtype
     
     Returns:
         Mel filter bank matrix
@@ -180,13 +181,33 @@ def safe_mel_filters(sr, n_fft, n_mels=80, fmin=0.0, fmax=None):
     try:
         # Try librosa first (best quality)
         import librosa
-        return librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax)
+        return librosa.filters.mel(
+            sr=sr,
+            n_fft=n_fft,
+            n_mels=n_mels,
+            fmin=fmin,
+            fmax=fmax,
+            **kwargs,
+        )
     except Exception as e:
         # Fallback to torchaudio
         if fmax is None:
             fmax = sr // 2
-        mel_transform = torchaudio.transforms.MelScale(n_mels=n_mels, sample_rate=sr, f_min=fmin, f_max=fmax, n_stft=n_fft // 2 + 1)
-        return mel_transform.fb.numpy()
+        mel_scale = "htk" if kwargs.get("htk", False) else "slaney"
+        norm = kwargs.get("norm", None)
+        torchaudio_norm = norm if norm in (None, "slaney") else None
+        dtype = kwargs.get("dtype", np.float32)
+        mel_transform = torchaudio.transforms.MelScale(
+            n_mels=n_mels,
+            sample_rate=sr,
+            f_min=fmin,
+            f_max=fmax,
+            n_stft=n_fft // 2 + 1,
+            norm=torchaudio_norm,
+            mel_scale=mel_scale,
+        )
+        # torchaudio stores filter banks as [n_stft, n_mels]; librosa returns [n_mels, n_stft].
+        return mel_transform.fb.T.numpy().astype(dtype, copy=False)
 
 
 def safe_stft(audio, n_fft=2048, hop_length=512, win_length=None, window='hann', center=True, pad_mode='reflect'):
@@ -233,13 +254,17 @@ def get_python313_status():
 
 
 def log_fallback_usage(function_name, reason="librosa compatibility"):
-    """Log when fallback functions are used"""
+    """Report a successful compatibility fallback without dumping its traceback."""
     if not get_python313_status():
         return
 
-    key = (function_name, reason)
+    key = function_name
     if key in _logged_fallbacks:
         return
 
     _logged_fallbacks.add(key)
-    print(f"🔄 Using fallback for {function_name} ({reason})")
+    print(f"ℹ️ {function_name} is unavailable in this environment; using the compatible fallback.")
+
+    if os.environ.get("TTS_AUDIO_SUITE_DEBUG_FALLBACKS") == "1":
+        detail = next((line.strip() for line in str(reason).splitlines() if line.strip()), "unknown")
+        print(f"   Fallback detail: {detail[:240]}")

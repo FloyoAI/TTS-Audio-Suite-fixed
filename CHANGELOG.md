@@ -5,6 +5,572 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.8.5] - 2026-08-26
+
+### Added
+
+- Add support for loading RVC models from nested folders
+- Add automatic matching for index files stored beside nested RVC models
+- Preserve support for the existing shared RVC index folder
+
+### Changed
+
+- Improve RVC character model organization
+## [5.8.4] - 2026-08-21
+
+### Added
+
+- Keep the example workflow reliable by disabling DeepSpeed by default
+- Automatically use standard inference when the optional DeepSpeed path is unsupported
+
+### Fixed
+
+- Fix IndexTTS DeepSpeed failures
+## [5.8.3] - 2026-08-18
+
+### Changed
+
+- Improve long-running ChatterBox session stability
+
+### Fixed
+
+- Fix ChatterBox generations degrading after extended use
+- Fix English ChatterBox returning very short audio after many generations
+- Fix Official 23-Lang v1/v2 accumulating background processing hooks
+## [5.8.2] - 2026-08-18
+
+### Added
+
+- Keep trained adapters visible and selectable with the matching community model
+
+### Fixed
+
+- Fix MOSS Voice Acting LoRA selection
+- Fix LoRA controls appearing unavailable when the LAION Voice Acting 8B model is selected
+## [5.8.1] - 2026-08-11
+
+### Added
+
+- Add MOSS-TTS community voice-acting model support
+- Add the clearly labeled LAION Voice Acting 8B community model with automatic download
+- Add compatible local full-checkpoint discovery from the MOSS model folder
+- Support experimental LoRA training with the LAION community checkpoint
+
+### Changed
+
+- Improve errors for unsupported local MOSS model layouts
+## [5.8.0] - 2026-08-11
+
+### Added
+
+- Add IndexTTS 2.5 as a new version of the existing IndexTTS engine
+- Add Chinese, English, Japanese, Spanish, and Arabic generation
+- Add explicit per-segment language switching for IndexTTS 2.5
+- Add official duration-factor and text-normalization controls
+- Keep IndexTTS 2.0 available for workflows that prefer its voice resemblance
+
+### Fixed
+
+- Fix stale audio or models when switching between IndexTTS 2.0 and 2.5
+## [5.7.0] - 2026-08-10
+
+### Added
+
+- Add integrated DramaBox LoRA model training
+- Add dataset preparation and training controls for DramaBox voice adapters
+- Add live training progress and loss reporting in the Model Training panel
+- Add DramaBox LoRA loading and adjustable adapter strength for inference
+- Add a ready-to-use DramaBox LoRA training workflow and guide
+
+### Changed
+
+- Improve shared speech-clip dataset staging for model training
+## [5.6.5] - 2026-08-03
+
+### Fixed
+
+- Fix MOSS-TTS training settings in saved workflows
+- Fix existing MOSS Dataset Prep workflows loading values into the wrong fields
+- Fix invalid validation split and preparation batch size errors after updating
+- Fix MOSS training tensor shape errors caused by shifted codec settings
+## [5.6.4] - 2026-08-03
+
+### Added
+
+- Add MOSS-TTS training dataset folder support
+- Add direct loading of matching audio and transcript files from a folder
+- Support WAV, FLAC, MP3, OGG, and M4A training clips
+- Add optional recursive scanning for datasets organized into subfolders
+- Preserve existing JSONL manifest workflows
+## [5.6.3] - 2026-08-01
+
+### Changed
+
+- Improve runtime availability checks so package startup code is not executed during installation
+
+### Fixed
+
+- Fix TTS Audio Suite installer validation failures
+- Fix ComfyUI Desktop installation failing on supported PyTorch and TorchAudio combinations
+## [5.6.2] - 2026-07-30
+
+### Changed
+
+- Improve F5-TTS fallback so the standard PyTorch attention backend continues working
+
+### Fixed
+
+- Fix F5-TTS failing to load with incomplete FlashAttention installations
+- Fix F5-TTS startup crashes when optional FlashAttention components are missing
+## [5.6.1] - 2026-07-30
+
+### Fixed
+
+- Fix Fish Audio S2 installation in headless Linux environments
+- Fix missing optional audio libraries preventing Fish Audio S2 setup
+- Improve Linux and macOS dependency warnings so core TTS installation continues
+- Correct Fedora package installation guidance
+## [5.6.0] - 2026-07-25
+
+### Added
+
+- Add DramaBox expressive TTS and ChatterBox V3 support
+- Add DramaBox scene prompting, character switching, prompt templates, and negative prompting
+- Add DramaBox native SRT duration targeting and generation-duration controls
+- Add DramaBox experimental staged and sequential memory strategies, FP8, and optional compilation
+- Add DramaBox near-silence warnings for text and subtitle generation
+- Add ChatterBox 23-Lang V3 checkpoint selection
+
+### Changed
+
+- Improve multiline parameter controls and generated-audio cache accuracy
+- Update engine comparison tables, model download information, and user guides
+## [5.5.3] - 2026-07-24
+
+### Added
+
+- Add an in-ComfyUI Character Alias Manager for creating, organizing, previewing, and overriding character aliases
+- Add Character Alias Manager access from Character Voices and the Multiline TTS Tag Editor
+
+### Changed
+
+- Improve Character Voices waveform clarity, canvas zoom behavior, character discovery, and console logging
+## [5.5.2] - 2026-07-21
+
+### Fixed
+
+- Fix IndexTTS-2 emotion vector importing
+- Fix the Import dialog appearing behind the emotion vector editor
+## [5.5.1] - 2026-07-18
+
+### Added
+
+- Add selectable shared and dedicated runtimes to the Step Audio EditX Engine node
+
+### Changed
+
+- Improve Step Audio EditX memory use and generation reliability
+
+### Fixed
+
+- Fix Step Audio EditX voice cloning producing silence, invalid speech, or assistant-like output
+- Fix Step Audio EditX inline emotion and style editing with isolated runtimes
+- Improve Step Audio EditX progress reporting and compatibility warnings
+## [5.5.0] - 2026-07-17
+
+### Added
+
+- Add MOSS-TTS v1.5 with expanded multilingual speech generation
+- Add MOSS-SoundEffect v1 and MOSS-SoundEffect v2 text-to-sound generation
+- Add unified Voice Designer support for Qwen3-TTS, MOSS-TTS, and OmniVoice
+- Add Save Character Voice for reusable generated or imported voices
+- Add Sound Effects parameter switching, pauses, chunking, crossfades, negative prompts, and audio caching
+- Add MOSS-TTS v1.5 LoRA training support
+- Add Voice Designer and Sound Effects example workflows and user guides
+
+### Changed
+
+- Improve Character Voices discovery, trimming, compact layouts, and immediate saved-voice availability
+- Improve model selection and Hugging Face download progress across supported engines
+
+### Removed
+
+- Remove the legacy Qwen3-TTS Voice Designer node; use Voice Designer instead
+## [5.4.16] - 2026-07-16
+
+### Fixed
+
+- Fix Qwen and Character Voices compatibility
+- Fix Qwen legacy runtimes failing with newer inherited dependencies
+- Fix Qwen text generation stopping after multi-block input
+- Fix old Character Voices workflows loading without their saved voice transcription
+## [5.4.15] - 2026-07-15
+
+### Fixed
+
+- Fix Fish Audio S2 and local VibeVoice loading
+- Fix Fish Audio S2 failing with recent TorchAudio versions
+- Fix local VibeVoice models not being found by Shared or Dedicated Runtime
+## [5.4.14] - 2026-07-15
+
+### Fixed
+
+- Fix engine installation failures reported on Python 3.13
+- Fix Fish Audio S2 failing to load after installation
+- Fix Dots TTS failing when optional text normalization is unavailable
+- Fix VibeVoice Shared Runtime installation failing on Windows
+## [5.4.13] - 2026-07-14
+
+### Added
+
+- Warn that HuBERT Large training is experimental and may produce unintelligible audio
+- Recommend ContentVec 768 for reliable RVC voice training
+
+### Fixed
+
+- Fix RVC voice conversion selecting an incompatible feature encoder
+- Automatically match RVC voice models with the correct feature encoder
+## [5.4.12] - 2026-07-14
+
+### Added
+
+- Allow Dots installation where its Python 3.13 source path works
+
+### Fixed
+
+- Fix Fish Audio S2 and Dots installation on Python 3.13
+- Repair Fish S2 installations missing the inference runtime
+## [5.4.11] - 2026-07-13
+
+### Fixed
+
+- Fix RVC Dataset Prep failing on first runs or incomplete cached datasets
+- Rebuild missing RVC training features automatically instead of stopping on missing feature directory errors
+## [5.4.10] - 2026-07-13
+
+### Added
+
+- Document reference transcript requirements across TTS engines
+- Add a Reference Transcript row to the engine Feature Comparison
+- Clarify which engines require, conditionally use, optionally use, or ignore transcripts
+- Add mode-specific notes for CosyVoice3, Qwen3-TTS, and MOSS-TTS
+## [5.4.9] - 2026-07-13
+
+### Added
+
+- Refine Character Voices waveform and discovery
+- Add a compact normalized waveform to Character Voices trim controls
+- Add playback progress and a smooth playhead within the waveform
+
+### Changed
+
+- Improve trim warning stability without shifting the node layout
+
+### Fixed
+
+- Fix repeated Character Voices discovery scans and console messages
+## [5.4.8] - 2026-07-13
+
+### Added
+
+- Prevent silent output from the unsupported FP16 flow and vocoder path
+
+### Fixed
+
+- Fix CosyVoice3 generation on ROCm systems
+- Fix CosyVoice3 generation failures caused by incompatible mixed precision
+- Show the underlying generation error instead of a misleading follow-on error
+## [5.4.7] - 2026-07-13
+
+### Added
+
+- Add automatic reference transcription loading with live workflow editing
+- Add draggable audio trimming with bounded playback and precise time controls
+- Add a reference-audio-only output for reuse in audio workflows
+
+### Changed
+
+- Enhance Character Voices reference editing
+- Improve customized voice handling across Unified Text and SRT engines
+
+### Fixed
+
+- Fix trimmed character voices using the original untrimmed source in some engines
+## [5.4.6] - 2026-07-13
+
+### Added
+
+- Add an editable import dialog that matches the export interface
+- Let users paste and adjust JSON values before applying them
+- Validate emotion values before updating the node
+- Make import controls clear and consistent with export
+
+### Changed
+
+- Improve IndexTTS-2 emotion vector import
+## [5.4.5] - 2026-07-12
+
+### Added
+
+- Repair incomplete or incompatible Fish Speech installations automatically
+
+### Fixed
+
+- Fix Fish Audio S2 installation on clean environments
+- Prevent Fish S2 generation from failing because its inference runtime is missing
+## [5.4.4] - 2026-07-11
+
+### Added
+
+- Add faster character, parameter, preset, and emotion swapping
+- Support combining IndexTTS audio emotion references with vector or text emotions
+
+### Changed
+
+- Improve Multiline TTS Tag Editor emotion switching
+- Improve long inline tag wrapping inside the editor
+
+### Fixed
+
+- Fix incorrect tag detection and extra blank lines when pressing Enter
+## [5.4.3] - 2026-07-10
+
+### Added
+
+- Keep emotion radar controls aligned at the original node size
+- Prevent the radar chart from overflowing its node
+- Make emotion vector export selectable and downloadable on demand
+- Show confirmation after importing emotion vectors
+
+### Fixed
+
+- Fix IndexTTS-2 emotion vector controls
+## [5.4.2] - 2026-07-10
+
+### Added
+
+- Corrects pitch-index typing for RVC voice conversion on MPS devices.
+- Preserves the model's expected precision for phone features across CPU, CUDA, and MPS.
+
+### Fixed
+
+- Tentative fix for RVC Voice Changer on Apple Silicon
+## [5.4.1] - 2026-07-10
+
+### Added
+
+- Prevents MelBand vocal removal from failing during sample-rate conversion on some Python 3.13 environments.
+- Corrects the documented location of the version bump instructions.
+- Makes future version bumps reliable on Windows installations with non-UTF-8 locales.
+
+### Fixed
+
+- Tentative fix for MelBand audio separation failures
+## [5.4.0] - 2026-07-10
+
+### Added
+
+- Add Fish Audio S2 Pro multilingual voice generation
+- Add Fish Audio S2 Pro voice cloning with reference audio and transcript support
+- Add native multi-speaker dialogue and independent character-segment generation
+- Add free-form inline speech instructions and automatic language prompting
+- Add long-form generation, SRT integration, compilation, caching, and optional quantization
+## [5.3.0] - 2026-06-23
+
+### Added
+
+- Add Granite ASR 4.1 diarization and timestamp improvements
+- Add Granite ASR plus-model speaker diarization with suite-native [Speaker] output for downstream TTS workflows
+- Clarify Granite ASR 4.1 model differences, diarization support, and Japanese support in the README and generated docs
+
+### Changed
+
+- Improve test runner portability and Granite ASR regression coverage for contributors
+
+### Fixed
+
+- Fix Granite ASR plus native word timestamps cutting off longer transcripts in timestamp mode
+## [5.2.0] - 2026-06-23
+
+### Added
+
+- Add OmniVoice engine with native timing-aware TTS controls
+- Add OmniVoice text and SRT generation with native duration targeting for more precise subtitle timing
+- Add Visual Tag Builder workflow example and documentation for OmniVoice prompt building
+
+### Changed
+
+- Improve interruption handling so stopped generation exits cleanly across unified TTS workflows
+
+### Fixed
+
+- Fix Qwen3 Voice Designer metadata links and test environment path handling
+## [5.1.1] - 2026-06-17
+
+### Added
+
+- Add a virtualenv fallback when the bundled Python cannot create isolated runtimes with venv
+- Keep isolated runtimes reusing the main ComfyUI Torch and other heavy dependencies when inheritance succeeds
+
+### Changed
+
+- Improve runtime bootstrap errors so users can see why environment creation failed
+
+### Fixed
+
+- Fix Unified ASR isolated runtime setup on portable ComfyUI
+- Fix Qwen3 ASR and Granite forced-aligner workflows failing before model startup on some portable Windows installs
+## [5.1.0] - 2026-06-15
+
+### Added
+
+- Add Dots TTS engine with multilingual cloning support
+- Add official Dots TTS engine for text and SRT generation
+- Refine language behavior, Portuguese metadata, and Dots engine documentation
+
+### Changed
+
+- Improve model unload, caching, and generation progress feedback
+## [5.0.0] - 2026-06-14
+
+### Added
+
+- Add Higgs Audio v3 TTS engine with native inline tags and zero-shot voice cloning
+- Add isolated runtimes for fragile legacy engines so the main environment no longer has to stay on the older stack
+
+### Changed
+
+- Improve the Multiline TTS Tag Editor with engine-aware inline tags, validation, conversion, and persistence
+- Update workflows, screenshots, and documentation for the new architecture
+## [4.27.3] - 2026-05-26
+
+### Added
+
+- Default RVC voice conversion to native long-audio segmentation
+- Add an RVC option for extra outer chunking when lower-VRAM chunk sizes are needed
+- Clarify which chunking mode is active in RVC conversion info
+
+### Changed
+
+- Change RVC custom chunking to opt-in
+## [4.27.2] - 2026-05-26
+
+### Added
+
+- Preserve duration more accurately for long audio and training workflows
+
+### Fixed
+
+- Fix RVC long-audio chunk timing drift
+- Fix RVC voice conversion outputs getting shorter over long chunked runs
+- Keep the fix inside the bundled RVC pipeline instead of stretching audio afterward
+## [4.27.1] - 2026-05-26
+
+### Added
+
+- Preserve timing when rejoining chunked audio across all VC engines
+
+### Changed
+
+- Clarify smart chunking guidance for cleaner boundaries
+
+### Fixed
+
+- Fix Unified Voice Changer long-audio chunk timing drift
+- Fix chunked voice conversion shortening long outputs over time
+## [4.27.0] - 2026-05-26
+
+### Added
+
+- Add initial MOSS-TTS LoRA training support
+- Add initial MOSS-TTS 8B Delay LoRA training through the unified Model Training node
+- Add MOSS dataset staging, manifest building, preparation, and an example training workflow
+- Add 4-bit MOSS LoRA training option for lower-VRAM training on smaller GPUs
+
+### Fixed
+
+- Fix MOSS direct TTS inference so narrator fallback is not forced when no reference is provided
+## [4.26.5] - 2026-05-23
+
+### Added
+
+- Add regression coverage for Chinese subtitle formatting and English spacing
+
+### Fixed
+
+- Fix Text to SRT Builder Chinese punctuation and spacing
+- Fix Chinese/Japanese/Korean subtitles being spaced incorrectly
+- Fix Chinese punctuation appearing as standalone text in generated SRT output
+- Fix Chinese quote spacing such as ：“吃饭了吗？”
+## [4.26.4] - 2026-05-23
+
+### Added
+
+- Add MOSS LoRA loading support for MOSS-TTS
+- Add local MOSS LoRA selection from the managed TTS moss_tts/loras folder
+- Install MOSS LoRA adapters from Hugging Face directly into the local TTS model folder instead of hidden cache storage
+- Show active MOSS LoRA adapters in generation info output
+- Show real ComfyUI popup errors for MOSS LoRA/base model mismatches
+- Add documentation for the MOSS LoRA folder layout and usage
+
+### Fixed
+
+- Fail fast when a MOSS LoRA was trained for the wrong base model
+- Improve MOSS compatibility with newer LoRA adapter packages and installer upgrades
+## [4.26.3] - 2026-05-19
+
+### Added
+
+- Keep local model labels visible in the dropdown when models are already downloaded
+
+### Fixed
+
+- Fix MOSS model selection instability after switching variants
+- Prevent value mismatch issues when switching between 1.7B and 8B variants
+- Improve compatibility with older workflows using local:* model values
+- Keep native dialogue mode execution mapped to the correct TTSD model
+## [4.26.2] - 2026-05-18
+
+### Added
+
+- Prevent Qwen3-TTS from crashing when flash-attn is not fully installed
+- Keep auto attention mode working without requiring manual setting changes
+
+### Fixed
+
+- Fix Qwen3-TTS generation failure on Windows with flash-attn issues
+- Automatically fall back to SDPA attention for better compatibility
+## [4.26.1] - 2026-05-18
+
+### Fixed
+
+- Fix RVC voice conversion matrix shape error in RMVPE fallback
+- Fix trained RVC models still returning original audio after the mel-filter fallback is used
+- Correct fallback mel filter shape for RMVPE pitch extraction
+- Improve RVC compatibility on Python 3.13 systems where librosa utility imports fail
+## [4.26.0] - 2026-05-18
+
+### Added
+
+- Add MOSS-TTS engine family with native multi-speaker dialogue
+- Add MOSS Local 1.7B, Delay 8B, and TTSD 8B model support in unified TTS workflows
+- Add native dialogue mapping support for [Character], [S1]/[1], and Speaker N formats
+- Native TTSD now shows explicit errors for unsupported controls (pause tags, inline edit tags, per-segment parameter changes, or more than 5 speakers) instead of silently switching models
+
+### Changed
+
+- Improve SRT native behavior with stable speaker mapping and clear incompatibility feedback
+## [4.25.21] - 2026-05-09
+
+### Added
+
+- Support mel filter options used by RMVPE pitch extraction on Python 3.13 setups
+
+### Fixed
+
+- Fix RVC voice conversion failing during RMVPE pitch extraction
+- Fix trained RVC models still returning original audio after the librosa utility fallback
+- Preserve normal librosa behavior while improving fallback compatibility
 ## [4.25.20] - 2026-05-07
 
 ### Added

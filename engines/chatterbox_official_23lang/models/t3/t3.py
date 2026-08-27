@@ -235,6 +235,9 @@ class T3(nn.Module):
         length_penalty=1.0,
         repetition_penalty=1.2,
         cfg_weight=0.5,
+        # TTS Audio Suite patch: V3 follows upstream by disabling the legacy
+        # multilingual alignment analyzer while V1/V2 retain existing behavior.
+        use_alignment_analyzer=True,
     ):
         """
         Args:
@@ -265,9 +268,15 @@ class T3(nn.Module):
         # TODO? synchronize the expensive compile function
         # with self.compile_lock:
         if not self.compiled:
+            # TTS Audio Suite patch: clean up hooks left by an interrupted prior inference.
+            previous_backend = getattr(self, "patched_model", None)
+            previous_analyzer = getattr(previous_backend, "alignment_stream_analyzer", None)
+            if previous_analyzer is not None:
+                previous_analyzer.close(self.tfmr)
+
             # Default to None for English models, only create for multilingual
             alignment_stream_analyzer = None
-            if self.hp.is_multilingual:
+            if self.hp.is_multilingual and use_alignment_analyzer:
                 alignment_stream_analyzer = AlignmentStreamAnalyzer(
                     self.tfmr,
                     None,
@@ -331,7 +340,7 @@ class T3(nn.Module):
             inputs_embeds=inputs_embeds,
             past_key_values=None,
             use_cache=True,
-            output_attentions=True,
+            output_attentions=use_alignment_analyzer,
             output_hidden_states=True,
             return_dict=True,
         )
@@ -399,4 +408,7 @@ class T3(nn.Module):
 
         # Concatenate all predicted tokens along the sequence dimension.
         predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
+        if self.patched_model.alignment_stream_analyzer is not None:
+            self.patched_model.alignment_stream_analyzer.close(self.tfmr)
+            self.patched_model.alignment_stream_analyzer = None
         return predicted_tokens

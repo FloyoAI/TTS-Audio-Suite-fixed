@@ -17,6 +17,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from utils.models.extra_paths import get_preferred_download_path
+from utils.hf_download_logging import quiet_hf_download_logs
 import folder_paths
 
 
@@ -81,12 +82,13 @@ class Qwen3ASRDownloader:
             print(f"📥 Downloading {model_name} from Hugging Face...")
             from huggingface_hub import snapshot_download
 
-            snapshot_download(
-                repo_id=repo_id,
-                local_dir=model_dir,
-                local_dir_use_symlinks=False,
-                resume_download=True
-            )
+            with quiet_hf_download_logs():
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=model_dir,
+                    local_dir_use_symlinks=False,
+                    resume_download=True
+                )
 
             if os.path.exists(model_dir) and os.listdir(model_dir):
                 print(f"\n✅ Download complete: {model_dir}")

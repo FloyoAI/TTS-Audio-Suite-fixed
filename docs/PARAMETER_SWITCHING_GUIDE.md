@@ -2,7 +2,7 @@
 
 ## Overview
 
-The TTS Audio Suite supports **per-segment parameter control** through inline tags. This allows you to override TTS generation parameters (seed, temperature, cfg, speed, etc.) on a per-segment basis, providing fine-grained control over individual audio segments without modifying node-level defaults.
+The TTS Audio Suite supports **per-segment parameter control** through bracket tags like `[Alice|seed:42|temp:0.5]`. This allows you to override TTS generation parameters (seed, temperature, cfg, speed, etc.) on a per-segment basis, providing fine-grained control over individual audio segments without modifying node-level defaults.
 
 Parameters are applied **only to the current segment** and automatically revert to node defaults for subsequent segments.
 
@@ -77,6 +77,38 @@ Parameters are applied **only to the current segment** and automatically revert 
 
 ### Engine-Specific Parameters
 
+#### MOSS-TTS
+| Parameter | Alias | Type | Range | Description |
+|-----------|-------|------|-------|-------------|
+| `top_p` | `topp` | float | 0.0-1.0 | Nucleus sampling probability |
+| `top_k` | `topk` | int | 1-100 | Top-k sampling |
+| `audio_temperature` | `audio_temp` | float | 0.1-2.5 | MOSS audio sampling temperature |
+| `audio_top_p` | — | float | 0.0-1.0 | MOSS audio nucleus sampling |
+| `audio_top_k` | — | int | 1-200 | MOSS audio top-k sampling |
+| `repetition_penalty` | `rep_penalty` | float | 0.5-3.0 | MOSS repetition penalty |
+| `audio_repetition_penalty` | `audio_rep_penalty` | float | 0.5-3.0 | MOSS audio repetition penalty |
+| `duration_tokens` | `tokens` | int | 0-8192 | MOSS target output length hint in audio tokens |
+| `max_new_tokens` | — | int | 64-16384 | Hard generation token limit |
+| `n_vq_for_inference` | `n_vq` | int | 0-32 | Local 1.7B only: RVQ layers/codebooks for inference |
+| `instruction` | — | string | text | Whole-segment speaking instruction |
+| `quality` | — | string | text | Whole-segment recording/presentation quality hint |
+| `sound_event` | — | string | text | Whole-segment sound event hint |
+| `ambient_sound` | — | string | text | Whole-segment ambient sound hint |
+
+#### MOSS Sound Effects
+
+MOSS-SoundEffect v1 uses the applicable MOSS-TTS parameters above. Both sound-effect engines also support a duration override:
+
+| Parameter | Alias | Engines | Type | Range | Description |
+|-----------|-------|---------|------|-------|-------------|
+| `duration_seconds` | `seconds` | v1, v2 | float | 0.5-300 | Duration of the sound segment |
+| `inference_steps` | `steps` | v2 | int | 1-150 | Diffusion steps |
+| `cfg` | — | v2 | float | 0.0-20.0 | Prompt guidance strength |
+| `sigma_shift` | — | v2 | float | 0.0-10.0 | Flow-matching schedule shift |
+| `negative_prompt` | `negative`, `neg` | v2 | string | text | Sounds or qualities to discourage |
+
+See the [Sound Effects Guide](SOUND_EFFECTS_GUIDE.md) for pauses, crossfades, long-duration chunking, and complete examples.
+
 #### ChatterBox & ChatterBox Official 23-Lang
 | Parameter | Alias | Type | Range | Description |
 |-----------|-------|------|-------|-------------|
@@ -103,13 +135,67 @@ Parameters are applied **only to the current segment** and automatically revert 
 | `top_p` | `topp` | float | 0.0-1.0 | Nucleus sampling probability |
 | `inference_steps` | `steps` | int | 1-100 | Number of inference steps |
 
-#### IndexTTS-2
+#### IndexTTS 2 / 2.5
 | Parameter | Alias | Type | Range | Description |
 |-----------|-------|------|-------|-------------|
 | `cfg` | — | float | 0.0-20.0 | CFG strength |
 | `top_p` | `topp` | float | 0.0-1.0 | Nucleus sampling probability |
 | `top_k` | `topk` | int | 1-100 | Top-k sampling |
-| `emotion_alpha` | — | float | 0.0-1.0 | Emotion control strength |
+| `emotion_alpha` | — | float | 0.0-1.0 | Shared audio/vector/text emotion intensity |
+| `duration_factor` | `dur_factor` | float | 0.5-2.0 | Official IndexTTS-2.5 internal feature-duration scaling; 0.5 shorter/faster, 2.0 longer/slower |
+
+`duration_factor` is a 2.5-only upstream parameter. It uses nearest-neighbor scaling inside the semantic length regulator after speech codes are generated. It is not natural prosody planning, exact-seconds targeting, waveform playback-speed control, or an inference-performance control. IndexTTS continues to use the suite's ordinary final timing modes in TTS SRT.
+
+Switching the engine node between IndexTTS-2 and IndexTTS-2.5 invalidates the cached Text/SRT processor and model identity. `language`, `duration_factor`, and `text_normalization` also participate in the generated-audio cache identity, so changing a supported 2.5 generation parameter cannot return audio produced with the previous setting.
+
+IndexTTS-2 also supports inline emotion controls. Named unsigned values replace
+that dimension; explicitly signed values adjust the connected vector:
+
+```text
+[sad:0.7|calm:0.2] Absolute values for this segment.
+[sad:+0.3|calm:-0.2] Adjust the connected vector for this segment.
+```
+
+All eight values can be supplied in the official order `happy, angry, sad,
+afraid, disgusted, melancholic, surprised, calm`:
+
+```text
+[vector:0,0,0.7,0,0,0.4,0,0.2] Absolute replacement.
+[vector:+0,+0,+0.3,+0,+0,+0,+0,-0.2] Relative adjustment.
+```
+
+Full relative vectors require an explicit sign on every value. Results are
+clamped to IndexTTS-2's supported range and revert to the connected vector at
+the next segment.
+
+Text emotion can use a saved preset or quoted text. `{seg}` is expanded with
+the current segment before QwenEmotion analysis:
+
+```text
+[emotion:restrained_anger] A saved preset.
+[emotion:"Quiet grief masking frustration"] A direct description.
+[emotion:"Infer nervous anticipation from this line: {seg}"] Dynamic analysis.
+```
+
+Click a numeric emotion tag in the TTS Tag Editor to open a contextual radar
+directly beside that tag. The editor also creates and manages text
+presets in `models/TTS/IndexTTS/emotion_presets.json`.
+
+IndexTTS-2 has separate engine inputs for these sources: connect vector or text
+emotion to `emotion_control` and audio emotion references to `emotion_audio`.
+Both may be connected simultaneously; IndexTTS-2 blends them during emotion
+conditioning. Inline vector/text controls override the connected vector/text
+values for their segment, while `[Character:emotion_ref]` selects a
+segment-local audio reference that can still blend with vector/text emotion.
+When an emotion control is inserted with the caret inside a character/audio tag,
+the editor appends or updates it as another pipe parameter, for example
+`[Bob:br_ivan_raiva3|sad:+0.25]`.
+
+The tag editor's quick-swap palette is engine-aware: parameter choices are
+filtered to the selected inline engine, while each engine's supported native
+emotion/style/prosody/sound tags use their own replacement choices. Named
+emotion presets can be swapped from the text; quoted `[emotion:"..."]` text is
+intentionally left as direct editable content rather than treated as a preset.
 
 ---
 
@@ -124,6 +210,36 @@ Parameters work seamlessly with character and language tags:
 [fr:Bob|temperature:0.7] French Bob with higher temperature.
 [seed:123|de:Alice] Order-independent syntax.
 ```
+
+### MOSS Whole-Segment Prompt Fields
+
+MOSS official prompt fields are better treated as per-segment parameters, not inline `<>` tags:
+
+```
+[Alice|instruction:Speak softly and calmly] Hello there.
+[Bob|quality:Telephone call quality|ambient_sound:Office room tone] Can you hear me?
+[Alice|sound_event:Laughter] That's actually funny.
+```
+
+Important:
+
+- These are whole-segment controls
+- They are not positional inline effects
+- Keep `<>` free for true inline post-processing tags like Step Audio EditX
+
+### DramaBox Prompt Templates
+
+`prompt_template` (alias `template`) applies a `{seg}` wrapper and enables
+templating for that segment automatically:
+
+```text
+[Narrator|template:A woman whispers, "{seg}"] This line is whispered.
+[Narrator] This line returns to the DramaBox engine-node settings.
+```
+
+The template should include `{seg}`. If it is omitted, DramaBox warns once and
+appends `"{seg}"` automatically. A separate inline enable parameter is not
+required.
 
 ### Per-Segment Fine-Tuning in SRT
 

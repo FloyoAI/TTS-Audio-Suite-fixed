@@ -24,6 +24,10 @@ from utils.text.pause_processor import PauseTagProcessor
 from utils.text.step_audio_editx_special_tags import get_edit_tags_for_segment
 from utils.audio.edit_post_processor import process_segments as apply_edit_post_processing
 from engines.adapters.step_audio_editx_adapter import StepAudioEditXEngineAdapter
+from utils.voice.character_logging import (
+    format_resolved_character_block,
+    resolved_character_label,
+)
 
 
 class StepAudioEditXProcessor:
@@ -53,9 +57,23 @@ class StepAudioEditXProcessor:
         device = engine_config.get('device', 'auto')
         torch_dtype = engine_config.get('torch_dtype', 'auto')
         quantization = engine_config.get('quantization', None)
+        runtime_mode = engine_config.get('runtime_mode', 'shared_runtime')
+        runtime_profile = engine_config.get('runtime_profile')
 
         # Load model via adapter
-        self.adapter.load_base_model(model_path, device, torch_dtype, quantization)
+        self.adapter.load_base_model(
+            model_path,
+            device,
+            torch_dtype,
+            quantization,
+            runtime_mode,
+            runtime_profile,
+        )
+        # Inline edit post-processing reuses this engine directly, so preserve
+        # the engine-node generation settings on the shared proxy/wrapper.
+        self.adapter.engine._temperature = engine_config.get('temperature', 0.7)
+        self.adapter.engine._do_sample = engine_config.get('do_sample', True)
+        self.adapter.engine._max_new_tokens = engine_config.get('max_new_tokens', 1024)
 
     def update_config(self, new_config: Dict[str, Any]):
         """Update processor configuration with new parameters."""
@@ -330,10 +348,9 @@ class StepAudioEditXProcessor:
             if edit_tags:
                 print(f"🎨 Found {len(edit_tags)} edit tag(s) for post-processing")
 
-            print(f"🎭 Step Audio EditX - Generating for '{character}'{voice_note}:")
-            print("="*60)
-            print(clean_text)
-            print("="*60)
+            display_name = resolved_character_label(character, voice_ref)
+            print(f"🎭 Step Audio EditX - Generating for '{display_name}'{voice_note}:")
+            print(format_resolved_character_block(character, clean_text, voice_ref))
 
             # Set current segment for time tracking (skip in SRT mode - managed at subtitle level)
             if not self._srt_mode:

@@ -7,7 +7,15 @@ Also injects condensed table into README.md between markers.
 
 import yaml
 import re
+import sys
 from pathlib import Path
+
+
+def configure_utf8_console() -> None:
+    """Keep Windows console output from failing on non-UTF-8 locales."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def load_data():
@@ -29,6 +37,20 @@ def format_support(value, notes=""):
         return "❌"
 
 
+def format_requirement(value):
+    """Format a non-boolean engine input requirement."""
+    labels = {
+        "required": "**Required**",
+        "conditional": "Conditional",
+        "optional": "Optional",
+        "not_used": "Not used",
+        "not_applicable": "N/A",
+    }
+    if value not in labels:
+        raise ValueError(f"Unknown engine requirement value: {value!r}")
+    return labels[value]
+
+
 def format_markdown_link(name, url):
     """Format optional markdown link."""
     if not name and not url:
@@ -48,6 +70,45 @@ def get_speed_emoji(speed_note):
         return "🐌"
 
 
+def get_runtime_mode_meta(data, mode_key):
+    """Resolve runtime isolation mode metadata."""
+    return data.get("runtime_isolation_modes", {}).get("modes", {}).get(mode_key, {})
+
+
+def get_engine_runtime_mode(engine):
+    """Return engine default runtime mode key."""
+    runtime_meta = engine.get("runtime_isolation")
+    if not runtime_meta:
+        return "main_environment"
+    return runtime_meta.get("default_mode", "main_environment")
+
+
+def format_runtime_label(data, mode_key, short=False):
+    """Format runtime mode label."""
+    meta = get_runtime_mode_meta(data, mode_key)
+    if short:
+        return meta.get("short_label") or meta.get("label") or mode_key
+    return meta.get("label", mode_key)
+
+
+def get_isolation_engines(data):
+    """Return engines that currently document runtime isolation support."""
+    return [engine for engine in data["engines"] if engine.get("runtime_isolation")]
+
+
+def build_isolation_note(data):
+    """Build a short isolation footnote for generated tables."""
+    isolation_engines = get_isolation_engines(data)
+    if not isolation_engines:
+        return ""
+
+    return (
+        "*Isolation column: `Main` runs in the main ComfyUI environment. "
+        "`Shared` uses a shared secondary runtime reused by multiple engines. "
+        "`Dedicated` uses an engine-specific secondary runtime.*"
+    )
+
+
 def generate_engine_comparison(data):
     """Generate main engine comparison table"""
     engines = data["engines"]
@@ -57,40 +118,47 @@ def generate_engine_comparison(data):
     output.append("")
     output.append("## Engine Comparison")
     output.append("")
-    output.append("| Engine             | Models                                    | Size         | TTS | SRT | VC  | ASR | Training | License                  | Special Features                                                                         | Languages                                                                                |")
-    output.append("| ------------------ | ----------------------------------------- | ------------ | :-: | :-: | :-: | :-: | :------: | ------------------------ | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |")
+    output.append("| Engine             | Isolation | Models                                    | Size         | TTS | SRT | VC  | ASR | Sound Effects | Training | License                  | Special Features                                                                         | Languages                                                                                |")
+    output.append("| ------------------ | --------- | ----------------------------------------- | ------------ | :-: | :-: | :-: | :-: | :-----------: | :------: | ------------------------ | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |")
 
     for e in engines:
-        # Extract flags from languages
-        # Use Zero Width Space to prevent flag ligature issues
-        flags = "\u200B".join(
-            lang_data["flag"]
-            for lang_data in e["languages"].values()
-            if lang_data["supported"]
-        )
+        language_summary = e.get("language_summary_full")
+        if not language_summary:
+            supported_language_count = sum(
+                1
+                for lang_key, lang_data in e["languages"].items()
+                if lang_key != "_default" and lang_data["supported"]
+            )
+            if e["id"] == "rvc":
+                language_summary = "Any"
+            else:
+                language_summary = str(supported_language_count)
 
         # Format special features with proper spacing
         features = ", ".join(e.get("special_features", []))
 
-        # Handle ChatterBox 23L special case for languages display
-        if e["id"] == "chatterbox-23l":
-            flags += "(+9)"
-
         row = [
             f"**{e['name']}**".ljust(18),
+            format_runtime_label(data, get_engine_runtime_mode(e), short=True).ljust(9),
             e["models"].ljust(41),
             e["size"].ljust(12),
             format_support(e["capabilities"]["tts"]),
             format_support(e["capabilities"]["srt"]),
             format_support(e["capabilities"]["vc"]),
             format_support(e["capabilities"]["asr"]),
+            format_support(e["capabilities"].get("sound_effects", False)),
             format_support(e["capabilities"].get("training", False)),
             e.get("license", "Unknown").ljust(24),
             features.ljust(88),
-            flags.ljust(88)
+            language_summary.ljust(88)
         ]
 
         output.append("| " + " | ".join(row) + " |")
+
+    isolation_note = build_isolation_note(data)
+    if isolation_note:
+        output.append("")
+        output.append(isolation_note)
 
     return "\n".join(output)
 
@@ -109,33 +177,39 @@ def generate_readme_condensed_table(data):
 
     # Show ALL engines
     for e in engines:
-
-        # Get first 6-8 language flags
-        flags = []
-        count = 0
-        for lang_data in e["languages"].values():
-            if lang_data["supported"]:
-                flags.append(lang_data["flag"])
-                count += 1
-                if count >= 6:  # Limit to 6 flags for readability
-                    break
-
-        lang_display = "\u200B".join(flags)
-
-        # Special handling for ChatterBox 23L
-        if e["id"] == "chatterbox-23l":
-            lang_display = "🌐 24 languages"
-        # Special handling for RVC
-        elif e["id"] == "rvc":
-            lang_display = "🌐 Any"
+        language_summary_override = e.get("language_summary_compact")
+        if language_summary_override:
+            lang_display = language_summary_override
         else:
-            # Add count if more languages exist
-            total_langs = sum(1 for ld in e["languages"].values() if ld["supported"])
-            if total_langs > 6:
-                lang_display += f" +{total_langs - 6}"
+            # Get first 6-8 language flags
+            flags = []
+            count = 0
+            for lang_data in e["languages"].values():
+                if isinstance(lang_data, dict) and lang_data.get("supported") and lang_data.get("flag"):
+                    flags.append(lang_data["flag"])
+                    count += 1
+                    if count >= 6:  # Limit to 6 flags for readability
+                        break
+
+            lang_display = "\u200B".join(flags)
+
+            # Special handling for ChatterBox 23L
+            if e["id"] == "chatterbox-23l":
+                lang_display = "🌐 24 languages"
+            # Special handling for RVC
+            elif e["id"] == "rvc":
+                lang_display = "🌐 Any"
+            else:
+                # Add count if more languages exist
+                total_langs = sum(1 for ld in e["languages"].values() if ld["supported"])
+                if total_langs > 6:
+                    lang_display += f" +{total_langs - 6}"
 
         # Get 1-2 key features
-        special_features = e.get("special_features", [])
+        special_features = e.get(
+            "readme_key_features",
+            e.get("special_features", []),
+        )
         if len(special_features) > 2:
             key_features = ", ".join(special_features[:2])
         else:
@@ -161,6 +235,8 @@ def generate_readme_condensed_table(data):
     output.append("*Note: These tables are generated automatically from source: [tts_audio_suite_engines.yaml](docs/Dev%20reports/tts_audio_suite_engines.yaml)*")
 
     return "\n".join(output)
+
+
 
 
 def generate_model_download_sources(data):
@@ -266,8 +342,15 @@ def generate_language_support(data):
     # Build rows for each language
     for lang_code in lang_codes:
         lang_info = lang_meta[lang_code]
-        # Get flag from first engine's language data (all have same flag)
-        flag = engines[0]["languages"][lang_code]["flag"]
+        flag = lang_info.get("flag")
+        if not flag:
+            for engine in engines:
+                engine_lang = engine.get("languages", {}).get(lang_code)
+                if engine_lang and engine_lang.get("flag"):
+                    flag = engine_lang["flag"]
+                    break
+        if not flag:
+            flag = "🌐"
 
         row = [
             f"{flag} **{lang_info['name']}**".ljust(14),
@@ -275,7 +358,14 @@ def generate_language_support(data):
         ]
 
         for e in engines:
-            lang_support = e["languages"][lang_code]
+            engine_languages = e.get("languages", {})
+            if e.get("id") == "rvc" and lang_code not in engine_languages:
+                lang_support = {"supported": True, "notes": ""}
+            else:
+                lang_support = engine_languages.get(
+                    lang_code,
+                    {"supported": False, "notes": ""}
+                )
             cell = format_support(lang_support["supported"], lang_support["notes"])
             row.append(cell)
 
@@ -317,6 +407,7 @@ def generate_feature_comparison(data):
         ("**SRT**", "srt"),
         ("**Voice Conversion**", "vc"),
         ("**ASR (Transcribe)**", "asr"),
+        ("**Sound Effects**", "sound_effects"),
         ("**Training**", "training"),
     ]
     duplicated_feature_keys = {"voice_conversion", "asr_transcribe"}
@@ -336,10 +427,18 @@ def generate_feature_comparison(data):
 
         for e in engines:
             feat_support = e["features"][feat_key]
-            cell = format_support(feat_support["supported"], feat_support["notes"])
+            if feat_info.get("value_type") == "requirement":
+                cell = format_requirement(feat_support["requirement"])
+            else:
+                cell = format_support(feat_support["supported"], feat_support["notes"])
             row.append(cell)
 
         output.append("| " + " | ".join(row) + " |")
+
+    transcript_note = data.get("table_notes", {}).get("reference_transcript", "")
+    if transcript_note:
+        output.append("")
+        output.append(f"† **Reference Transcript:** {transcript_note}")
 
     return "\n".join(output)
 
@@ -380,7 +479,7 @@ def generate_license_table(data):
     output.append(header)
     output.append(sep)
     for name, lic, com in rows:
-        output.append(f"  {name:<{col1}}  {lic:<{col2}}  {com:<{col3}}")
+        output.append(f"  {name:<{col1}}  {lic:<{col2}}  {com}")
     output.append(sep)
     output.append("")
     output.append("Users are responsible for complying with respective model licenses.")
@@ -566,7 +665,6 @@ def main():
             "<!-- README_MODEL_DOWNLOAD_TABLE_START -->",
             "<!-- README_MODEL_DOWNLOAD_TABLE_END -->",
         )
-
         if condensed_result is None or model_table_result is None:
             print("❌ README.md injection failed (markers not found)")
         elif condensed_result is True or model_table_result is True:
@@ -582,4 +680,5 @@ def main():
 
 
 if __name__ == "__main__":
+    configure_utf8_console()
     main()

@@ -16,6 +16,7 @@ except ImportError:
     get_all_voices_paths = None
 
 from utils.voice.cache_manager import VoiceDiscoveryCacheManager
+from utils.voice.alias_store import get_user_alias_file, parse_alias_document, parse_alias_line
 
 
 class VoiceDiscovery:
@@ -31,6 +32,7 @@ class VoiceDiscovery:
     - Performance caching to avoid repeated filesystem scans
     - Backward compatibility with existing flat structure
     """
+    _GLOBAL_LAST_DISCOVERY_SIGNATURE = None
     
     def __init__(self):
         self._cache = {}
@@ -39,6 +41,8 @@ class VoiceDiscovery:
         self._character_cache_valid = False
         self._character_aliases = {}
         self._character_language_defaults = {}
+        self._character_alias_records = {}
+        self._inherited_alias_records = {}
         self._aliases_valid = False
         self._discovery_logged = False  # Track if we've logged discovery for this instance
 
@@ -48,6 +52,28 @@ class VoiceDiscovery:
 
         # Defer character discovery to first access (non-blocking startup)
         self._initialized = False
+
+    def _maybe_log_character_discovery(self, *, force: bool = False):
+        """Log a completed filesystem discovery only when its result changes."""
+        char_count = len(self._character_cache)
+        alias_count = len(self._character_aliases)
+        if char_count <= 0:
+            return
+
+        signature = (char_count, alias_count)
+        already_logged_same_signature = (
+            not force and
+            VoiceDiscovery._GLOBAL_LAST_DISCOVERY_SIGNATURE == signature
+        )
+
+        if not already_logged_same_signature:
+            if alias_count > 0:
+                print(f"[TTS Audio Suite] 🎭 Character voices: Found {char_count} characters, {alias_count} aliases")
+            else:
+                print(f"[TTS Audio Suite] 🎭 Character voices: Found {char_count} characters")
+
+            VoiceDiscovery._GLOBAL_LAST_DISCOVERY_SIGNATURE = signature
+            self._discovery_logged = True
     
     def _ensure_initialized(self):
         """
@@ -68,18 +94,10 @@ class VoiceDiscovery:
                     self._character_cache = cached_data.get('character_cache', {})
                     self._character_aliases = cached_data.get('character_aliases', {})
                     self._character_language_defaults = cached_data.get('character_language_defaults', {})
+                    self._character_alias_records = cached_data.get('character_alias_records', {})
+                    self._inherited_alias_records = cached_data.get('inherited_alias_records', {})
                     self._character_cache_valid = True
-                    self._aliases_valid = True
-
-                    # Only log once (first time initialization)
-                    if len(self._character_cache) > 0 and not self._discovery_logged:
-                        alias_count = len(self._character_aliases)
-                        if alias_count > 0:
-                            print(f"[TTS Audio Suite] 🎭 Character voices: Found {len(self._character_cache)} characters, {alias_count} aliases (cached)")
-                        else:
-                            print(f"[TTS Audio Suite] 🎭 Character voices: Found {len(self._character_cache)} characters (cached)")
-                        print(f"[TTS Audio Suite] 🔄 Updating character discovery in background...")
-                        self._discovery_logged = True
+                    self._aliases_valid = bool(self._character_alias_records) or not self._character_aliases
 
                     # Start background refresh after ComfyUI loads
                     self._cache_manager.start_background_refresh(self._get_fresh_cache_data)
@@ -96,14 +114,8 @@ class VoiceDiscovery:
             cache_data = self._get_fresh_cache_data()
             self._cache_manager.save_cache(cache_data)
 
-            # Only log once (first time initialization)
-            if len(self._character_cache) > 0 and not self._discovery_logged:
-                alias_count = len(self._character_aliases)
-                if alias_count > 0:
-                    print(f"[TTS Audio Suite] 🎭 Character voices: Found {len(self._character_cache)} characters, {alias_count} aliases")
-                else:
-                    print(f"[TTS Audio Suite] 🎭 Character voices: Found {len(self._character_cache)} characters")
-                self._discovery_logged = True
+            if len(self._character_cache) > 0:
+                self._maybe_log_character_discovery()
 
             # Start background refresh for updates
             self._cache_manager.start_background_refresh(self._get_fresh_cache_data)
@@ -135,7 +147,9 @@ class VoiceDiscovery:
             cache_data = {
                 'character_cache': self._character_cache,
                 'character_aliases': self._character_aliases,
-                'character_language_defaults': self._character_language_defaults
+                'character_language_defaults': self._character_language_defaults,
+                'character_alias_records': self._character_alias_records,
+                'inherited_alias_records': self._inherited_alias_records,
             }
 
             # Print update message if cache changed
@@ -231,7 +245,19 @@ class VoiceDiscovery:
                 if msg_parts:
                     print(f"🎭 Character voices updated: {', '.join(msg_parts)}")
 
-        return ["none"] + sorted(self._cache.keys())
+        def voice_sort_key(voice_key: str):
+            source = self._cache.get(voice_key, {}).get("source_folder", "")
+            if source == "models/voices":
+                priority = 0
+            elif source.startswith("extra:"):
+                priority = 1
+            elif source == "models/TTS/voices":
+                priority = 2
+            else:
+                priority = 3
+            return priority, os.path.basename(voice_key).lower(), voice_key.lower()
+
+        return ["none"] + sorted(self._cache.keys(), key=voice_sort_key)
     
     def get_voice_info(self, voice_key: str) -> Optional[Dict[str, str]]:
         """
@@ -402,7 +428,7 @@ class VoiceDiscovery:
                             'text_path': text_path,
                             'text_content': text_content,
                             'source_folder': source_name,
-                            'relative_path': rel_path
+                            'relative_path': rel_path,
                         }
                         
         except Exception as e:
@@ -471,6 +497,8 @@ class VoiceDiscovery:
         self._aliases_valid = False
         self._character_aliases.clear()
         self._character_language_defaults.clear()
+        self._character_alias_records.clear()
+        self._inherited_alias_records.clear()
     
     def get_available_characters(self, force_refresh: bool = False) -> Set[str]:
         """
@@ -537,9 +565,9 @@ class VoiceDiscovery:
         if not character_info:
             return None
         
-        # For audio-only engines (ChatterBox, VibeVoice, Higgs, CosyVoice), we don't require text files
+        # For reference-only engines (ChatterBox, MOSS-TTS, VibeVoice, Higgs), we don't require text files
         # Return full character_info (includes text_content which may be empty string)
-        if engine_type == "audio_only" or engine_type == "chatterbox":  # Keep backward compatibility
+        if engine_type in ("audio_only", "chatterbox", "moss_tts", "higgs_audio_v3"):  # Keep backward compatibility
             return character_info
         
         # For audio+text engines (F5-TTS, Step Audio EditX, CosyVoice, Qwen3-TTS), we need both audio and text
@@ -596,20 +624,19 @@ class VoiceDiscovery:
         if not self._cache_valid:
             self._refresh_cache()
         
-        # Scan voices_examples/ directory for character folders
-        voices_examples_dir = self._get_voices_examples_dir()
-        if voices_examples_dir and os.path.exists(voices_examples_dir):
-            self._scan_character_directories(voices_examples_dir, "voices_examples")
-        
-        # Scan models/TTS/voices/ directory for character folders
-        models_tts_voices_dir = self._get_models_tts_voices_dir()
-        if models_tts_voices_dir and os.path.exists(models_tts_voices_dir):
-            self._scan_character_directories(models_tts_voices_dir, "models/TTS/voices")
-        
-        # Scan models/voices/ directory for character folders
+        # Explicit priority: user voices, TTS fallback voices, then bundled examples.
+        # The first occurrence wins, so examples can never override user files.
         models_voices_dir = self._get_models_voices_dir()
         if models_voices_dir and os.path.exists(models_voices_dir):
             self._scan_character_directories(models_voices_dir, "models/voices")
+
+        models_tts_voices_dir = self._get_models_tts_voices_dir()
+        if models_tts_voices_dir and os.path.exists(models_tts_voices_dir):
+            self._scan_character_directories(models_tts_voices_dir, "models/TTS/voices")
+
+        voices_examples_dir = self._get_voices_examples_dir()
+        if voices_examples_dir and os.path.exists(voices_examples_dir):
+            self._scan_character_directories(voices_examples_dir, "voices_examples")
         
         # Scan any additional extra_model_paths.yaml configured voices directories for characters
         if get_all_voices_paths:
@@ -641,6 +668,8 @@ class VoiceDiscovery:
         """Refresh character aliases from alias map files."""
         self._character_aliases.clear()
         self._character_language_defaults.clear()
+        self._character_alias_records.clear()
+        self._inherited_alias_records.clear()
         
         # Load aliases in priority order (later loads override earlier ones)
         
@@ -683,7 +712,18 @@ class VoiceDiscovery:
             except Exception:
                 # Silently handle any extra paths errors
                 pass
-        
+
+        # Preserve the effective inherited layer so deleting a user override can
+        # reveal the value beneath it without modifying any shipped/model files.
+        self._inherited_alias_records = {
+            key: value.copy() for key, value in self._character_alias_records.items()
+        }
+
+        # 5. Per-profile UI overrides always win, including over extra voice paths.
+        user_alias_file = get_user_alias_file()
+        if user_alias_file and os.path.exists(user_alias_file):
+            self._load_txt_alias_file(user_alias_file, "user")
+
         self._aliases_valid = True
     
     def _load_alias_file(self, base_dir: str, source_name: str):
@@ -702,25 +742,29 @@ class VoiceDiscovery:
     def _load_txt_alias_file(self, alias_file: str, source_name: str):
         """Load character aliases from txt file with flexible format."""
         try:
-            with open(alias_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
             loaded_count = 0
-            for line_num, line in enumerate(lines, 1):
-                # Strip whitespace
-                line = line.strip()
-                
-                # Skip empty lines and comments
-                if not line or line.startswith('#'):
-                    continue
-                
-                # Try parsing the line
-                alias, target, language = self._parse_alias_line(line, line_num, alias_file)
-                if alias and target:
+            for group in parse_alias_document(alias_file, infer_legacy_groups=source_name != "user"):
+                for entry in group["aliases"]:
+                    alias = entry["alias"]
+                    target = entry["target"]
+                    language = entry["language"]
                     # Convert to lowercase for consistent matching
-                    self._character_aliases[alias.lower()] = target.lower()
+                    alias_key = alias.lower()
+                    self._character_aliases[alias_key] = target.lower()
                     if language:
-                        self._character_language_defaults[alias.lower()] = language.lower()
+                        self._character_language_defaults[alias_key] = language.lower()
+                    else:
+                        self._character_language_defaults.pop(alias_key, None)
+                    # A higher-priority source owns both the value and display order.
+                    self._character_alias_records.pop(alias_key, None)
+                    self._character_alias_records[alias_key] = {
+                        "alias": alias,
+                        "target": target,
+                        "language": language or "",
+                        "source": source_name,
+                        "group": group["name"],
+                        "groupNotes": group["notes"] if source_name == "user" else [],
+                    }
                     loaded_count += 1
             
             if loaded_count > 0:
@@ -731,43 +775,11 @@ class VoiceDiscovery:
     
     def _parse_alias_line(self, line: str, line_num: int, alias_file: str) -> tuple[str, str, str]:
         """Parse a single alias line supporting both = and tab formats with optional language."""
-        alias = None
-        target = None
-        language = None
-        
         try:
-            # Try splitting on = first
-            if '=' in line:
-                parts = line.split('=', 1)
-                if len(parts) == 2:
-                    alias = parts[0].strip()
-                    right_side = parts[1].strip()
-                    
-                    # Check if right side has language (comma-separated)
-                    if ',' in right_side:
-                        target_parts = right_side.split(',', 1)
-                        target = target_parts[0].strip()
-                        language = target_parts[1].strip()
-                    else:
-                        target = right_side
-                        
-            # Try splitting on tab(s)
-            elif '\t' in line:
-                parts = line.split('\t')
-                # Filter out empty parts (handles multiple tabs)
-                parts = [p.strip() for p in parts if p.strip()]
-                if len(parts) >= 2:
-                    alias = parts[0]
-                    target = parts[1]
-                    # Check for third part (language)
-                    if len(parts) >= 3:
-                        language = parts[2]
-            
-            # Validate
+            alias, target, language = parse_alias_line(line)
             if not alias or not target:
                 print(f"⚠️ Character Aliases: Invalid format on line {line_num} in {alias_file}: '{line}'")
                 return None, None, None
-            
             return alias, target, language
             
         except Exception as e:
@@ -788,7 +800,18 @@ class VoiceDiscovery:
             for alias, target in aliases.items():
                 if isinstance(alias, str) and isinstance(target, str):
                     # Convert to lowercase for consistent matching
-                    self._character_aliases[alias.lower()] = target.lower()
+                    alias_key = alias.lower()
+                    self._character_aliases[alias_key] = target.lower()
+                    self._character_language_defaults.pop(alias_key, None)
+                    self._character_alias_records.pop(alias_key, None)
+                    self._character_alias_records[alias_key] = {
+                        "alias": alias,
+                        "target": target,
+                        "language": "",
+                        "source": source_name,
+                        "group": "Ungrouped",
+                        "groupNotes": [],
+                    }
                     loaded_count += 1
                 else:
                     print(f"⚠️ Character Aliases: Invalid alias entry '{alias}' -> '{target}' in {alias_file}")
@@ -827,6 +850,38 @@ class VoiceDiscovery:
             self._refresh_character_aliases()
         
         return self._character_aliases.copy()
+
+    def get_character_alias_records(self, force_refresh: bool = False) -> Dict[str, List[Dict[str, str]]]:
+        """Return source-aware effective and inherited alias records for the UI."""
+        self._ensure_initialized()
+        if force_refresh:
+            self._aliases_valid = False
+        if not self._aliases_valid:
+            self._refresh_character_aliases()
+
+        return {
+            "records": [
+                record.copy()
+                for record in self._character_alias_records.values()
+            ],
+            "inherited": [
+                record.copy()
+                for record in self._inherited_alias_records.values()
+            ],
+        }
+
+    def refresh_character_aliases(self) -> Dict[str, List[Dict[str, str]]]:
+        """Reload aliases immediately and persist the refreshed discovery cache."""
+        records = self.get_character_alias_records(force_refresh=True)
+        cache_data = {
+            'character_cache': self._character_cache,
+            'character_aliases': self._character_aliases,
+            'character_language_defaults': self._character_language_defaults,
+            'character_alias_records': self._character_alias_records,
+            'inherited_alias_records': self._inherited_alias_records,
+        }
+        self._cache_manager.save_cache(cache_data)
+        return records
     
     def get_character_language_defaults(self) -> Dict[str, str]:
         """
@@ -895,21 +950,19 @@ class VoiceDiscovery:
                     # Extract character name from filename (remove extension)
                     character_name = Path(audio_file).stem.lower()
                     
-                    # Skip if this character was already found (first occurrence wins)
-                    if character_name in self._character_cache:
-                        continue
-                    
                     # Look for companion text file
                     text_path, text_content = self._find_companion_text(audio_path)
-                    
-                    # Store character info
-                    self._character_cache[character_name] = {
+
+                    character_info = {
                         'audio_path': audio_path,
                         'text_path': text_path,
                         'text_content': text_content or "",
                         'source_folder': source_name,
-                        'character_directory': root  # Store the actual directory containing the file
+                        'character_directory': root,
                     }
+
+                    # Global mapping keeps explicit source priority from scan order.
+                    self._character_cache.setdefault(character_name, character_info)
                     
         except Exception as e:
             print(f"⚠️ Character Discovery: Error scanning audio files in {source_name}: {e}")
@@ -977,6 +1030,16 @@ def get_available_characters(force_refresh: bool = False) -> Set[str]:
         force_refresh: If True, rescan directories for new characters (for ComfyUI refresh)
     """
     return voice_discovery.get_available_characters(force_refresh=force_refresh)
+
+
+def get_character_alias_records(force_refresh: bool = False) -> Dict[str, List[Dict[str, str]]]:
+    """Return source-aware alias records for the Character Alias Manager."""
+    return voice_discovery.get_character_alias_records(force_refresh=force_refresh)
+
+
+def refresh_character_aliases() -> Dict[str, List[Dict[str, str]]]:
+    """Reload only alias mappings and update the persistent discovery cache."""
+    return voice_discovery.refresh_character_aliases()
 
 
 def load_character_voice(character_name: str, engine_type: str = "f5tts") -> Tuple[Optional[str], Optional[str]]:

@@ -1,5 +1,5 @@
 """
-IndexTTS-2 Engine Configuration Node
+IndexTTS 2 / 2.5 Engine Configuration Node
 
 Provides comprehensive configuration interface for IndexTTS-2 TTS engine with all
 official parameters exposed for experimentation and fine-tuning.
@@ -59,7 +59,7 @@ class IndexTTSEngineNode(BaseTTSNode):
     
     @classmethod
     def NAME(cls):
-        return "⚙️ IndexTTS-2 Engine"
+        return "⚙️ IndexTTS 2 / 2.5 Engine"
     
     @classmethod
     def INPUT_TYPES(cls):        
@@ -71,7 +71,7 @@ class IndexTTSEngineNode(BaseTTSNode):
                 # Model Configuration
                 "model_path": (model_paths, {
                     "default": model_paths[0] if model_paths else "IndexTTS-2",
-                    "tooltip": "IndexTTS-2 model selection:\n• local:ModelName: Use locally installed model (respects extra_model_paths.yaml)\n• ModelName: Auto-download model if not found locally\n• Downloads respect extra_model_paths.yaml configuration"
+                    "tooltip": "IndexTTS model version selection:\n• IndexTTS-2.5: multilingual model with official duration-factor scaling\n• IndexTTS-2: legacy emotion-disentanglement model\n• local:ModelName: use a locally installed model\n• Downloads respect extra_model_paths.yaml"
                 }),
                 "device": (["auto", "cuda", "xpu", "cpu", "mps"], {
                     "default": "auto",
@@ -80,8 +80,8 @@ class IndexTTSEngineNode(BaseTTSNode):
                 
                 # IndexTTS-2 Unique Features
                 "emotion_alpha": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1,
-                    "tooltip": "Emotion intensity control (0.0-2.0). Affects emotion control from connected emotion nodes. 1.0=full emotion, 0.5=50% blend, 0.0=neutral."
+                    "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Emotion conditioning strength (0.0-1.0). Applies to connected audio/vector/text emotion controls."
                 }),
                 "use_random": ("BOOLEAN", {
                     "default": False,
@@ -137,7 +137,7 @@ class IndexTTSEngineNode(BaseTTSNode):
                 # Model Options
                 "use_fp16": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Use FP16 for faster inference. Disable if you encounter numerical issues."
+                    "tooltip": "Use reduced precision: FP16 for IndexTTS-2 and BF16 for IndexTTS-2.5. Unsupported devices fall back safely."
                 }),
                 "use_deepspeed": ("BOOLEAN", {
                     "default": False,
@@ -147,11 +147,16 @@ class IndexTTSEngineNode(BaseTTSNode):
             "optional": {
                 # Unified Emotion Control - Using multitype input for better connection suggestions
                 "emotion_control": (any_typ, {
-                    "tooltip": """• 🌈 Emotion Vectors - Manual emotion control sliders
-• 🎭 Character Voices (opt_narrator) - Audio-based emotion reference
+                    "tooltip": """Vector/text emotion control (legacy unified input):
+• 🌈 Emotion Vectors - Manual emotion control sliders
 • 🌈 Text Emotion - AI-analyzed emotion from text
-• Direct AUDIO - Any audio input for emotion reference
-Character emotion tags [Alice:emotion_ref] will override this for specific characters."""
+Connect audio separately to 'emotion_audio' when you want to blend both.
+Character emotion tags [Alice:emotion_ref] can provide per-segment audio emotion."""
+                }),
+                "emotion_audio": (any_typ, {
+                    "tooltip": """Dedicated emotion-reference audio input.
+Connect Character Voices, opt_narrator, or AUDIO here.
+This can be connected together with the vector/text emotion input above; IndexTTS-2 blends both."""
                 }),
 
                 # CUDA Kernel Option
@@ -179,7 +184,20 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
                 }),
                 "low_vram": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Enable Low VRAM mode. Keeps models on CPU and only moves them to GPU when needed. Prevents OOM on 8GB cards but is slower."
+                    "tooltip": "Enable IndexTTS low-VRAM behavior. Legacy 2.0 uses sequential offloading; 2.5 uses more aggressive text splitting."
+                }),
+                # Appended for workflow widget-position compatibility.
+                "language": (["English", "Chinese", "Japanese", "Spanish", "Arabic"], {
+                    "default": "English",
+                    "tooltip": "IndexTTS-2.5 generation language. Character language tags override this per segment. Legacy IndexTTS-2 ignores this control."
+                }),
+                "duration_factor": ("FLOAT", {
+                    "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.01,
+                    "tooltip": "Official IndexTTS-2.5 internal feature-duration scaling; legacy IndexTTS-2 ignores it. 0.5 is shorter/faster speech; 1.0 is unchanged; 2.0 is longer/slower. This uses nearest-neighbor scaling of semantic features, not natural prosody or exact-duration planning, and extreme values can sound stretched. It does not improve inference speed."
+                }),
+                "text_normalization": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Enable IndexTTS-2.5 multilingual text normalization and pronunciation-annotation protection."
                 }),
             }
         }
@@ -192,19 +210,20 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
     @classmethod
     def _get_model_paths(cls) -> List[str]:
         """Get available IndexTTS-2 model paths following F5TTS pattern."""
-        paths = ["IndexTTS-2"]  # Auto-download option (just model name)
+        paths = ["IndexTTS-2.5", "IndexTTS-2"]
 
         try:
             # Check all configured TTS model paths
             all_tts_paths = get_all_tts_model_paths('TTS')
 
             for base_path in all_tts_paths:
-                # Check direct path (models/TTS/IndexTTS-2)
-                index_direct = os.path.join(base_path, "IndexTTS-2")
-                if os.path.exists(os.path.join(index_direct, "config.yaml")):
-                    local_model = "local:IndexTTS-2"
-                    if local_model not in paths:
-                        paths.insert(0, local_model)  # Insert at beginning
+                # Check direct paths used by older extra_model_paths layouts.
+                for direct_name in ("IndexTTS-2.5", "IndexTTS-2"):
+                    index_direct = os.path.join(base_path, direct_name)
+                    if os.path.exists(os.path.join(index_direct, "config.yaml")):
+                        local_model = f"local:{direct_name}"
+                        if local_model not in paths:
+                            paths.insert(0, local_model)
 
                 # Check organized path (models/TTS/IndexTTS/IndexTTS-2)
                 index_organized = os.path.join(base_path, "IndexTTS")
@@ -253,6 +272,10 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
         stream_return: bool = False,
         more_segment_before: int = 0,
         low_vram: bool = False,
+        emotion_audio = None,
+        language: str = "English",
+        duration_factor: float = 1.0,
+        text_normalization: bool = True,
     ):
         """
         Create IndexTTS-2 engine adapter with configuration.
@@ -261,21 +284,38 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
             Tuple containing IndexTTS-2 engine configuration data
         """
         try:
-            # Process unified emotion control
+            # Process vector/text control independently from dedicated audio.
+            connected_emotion_audio = emotion_audio
             emotion_audio = None
             emotion_vector = None
             use_emotion_text = False
             emotion_text = None
             is_dynamic_template = False
 
-            if emotion_control:
-                if isinstance(emotion_control, dict):
+            def is_audio_control(value):
+                return isinstance(value, dict) and any(
+                    key in value for key in ("audio_path", "waveform", "audio")
+                )
+
+            # Keep old workflows working when audio was connected to the
+            # original unified socket.  The new dedicated socket wins when
+            # both are connected.
+            legacy_audio_control = emotion_control if is_audio_control(emotion_control) else None
+            vector_text_control = None if legacy_audio_control is not None else emotion_control
+            emotion_audio = (
+                connected_emotion_audio
+                if connected_emotion_audio is not None
+                else legacy_audio_control
+            )
+
+            if vector_text_control:
+                if isinstance(vector_text_control, dict):
                     # Check the type of emotion control
-                    emotion_type = emotion_control.get("type")
+                    emotion_type = vector_text_control.get("type")
 
                     if emotion_type == "emotion_vectors":
                         # Emotion vectors from options node
-                        emotion_vectors = emotion_control.get("emotion_vectors", {})
+                        emotion_vectors = vector_text_control.get("emotion_vectors", {})
                         emotions = [
                             emotion_vectors.get("happy", 0.0),
                             emotion_vectors.get("angry", 0.0),
@@ -291,17 +331,9 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
 
                     elif emotion_type == "qwen_emotion":
                         # QwenEmotion text analysis
-                        use_emotion_text = emotion_control.get("use_emotion_text", False)
-                        emotion_text = emotion_control.get("emotion_text", "")
-                        is_dynamic_template = emotion_control.get("is_dynamic_template", False)
-
-                    elif "waveform" in emotion_control or "audio" in emotion_control:
-                        # Direct audio input (NARRATOR_VOICE from Character Voices or AUDIO)
-                        emotion_audio = emotion_control
-
-                elif hasattr(emotion_control, 'get') and ("waveform" in emotion_control or "audio" in emotion_control):
-                    # Direct audio input
-                    emotion_audio = emotion_control
+                        use_emotion_text = vector_text_control.get("use_emotion_text", False)
+                        emotion_text = vector_text_control.get("emotion_text", "")
+                        is_dynamic_template = vector_text_control.get("is_dynamic_template", False)
             
             # Parse CUDA kernel option
             cuda_kernel_option = None
@@ -321,7 +353,7 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
             config = {
                 "model_path": model_path,
                 "device": device,
-                "emotion_audio": emotion_audio,  # Will be None if not connected, audio dict if connected
+                "emotion_audio": emotion_audio,  # Dedicated audio emotion input
                 "emotion_alpha": emotion_alpha,
                 "use_emotion_text": use_emotion_text,
                 "emotion_text": emotion_text if emotion_text and emotion_text.strip() else None,
@@ -348,13 +380,26 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
                 "stream_return": stream_return,
                 "more_segment_before": more_segment_before,
                 "low_vram": low_vram,
+                "language": language,
+                "duration_factor": duration_factor,
+                "text_normalization": _coerce_bool_flag(text_normalization),
             }
             
-            print(f"⚙️ IndexTTS-2: Configured on {device}")
+            print(f"⚙️ IndexTTS: Configured on {device}")
             print(f"   Model: {model_path}")
+            if "2.5" in model_path:
+                print(f"   Language: {language} | Official feature-duration factor: {duration_factor:.2f}")
             emotion_desc = f"alpha={emotion_alpha}, use_text={use_emotion_text}"
             if is_dynamic_template:
                 emotion_desc += " (dynamic template)"
+            emotion_sources = []
+            if emotion_audio is not None:
+                emotion_sources.append("audio")
+            if emotion_vector is not None:
+                emotion_sources.append("vector")
+            if use_emotion_text:
+                emotion_sources.append("text")
+            emotion_desc += f", sources={'+'.join(emotion_sources) if emotion_sources else 'none'}"
             print(f"   Emotion: {emotion_desc}")
             print(f"   Generation: temp={temperature}, top_p={top_p}, top_k={top_k}, do_sample={do_sample}, num_beams={num_beams}")
             print(f"   Chunking: max_tokens={max_text_tokens_per_segment}, silence={interval_silence}ms")
@@ -381,7 +426,7 @@ Character emotion tags [Alice:emotion_ref] will override this for specific chara
             return (engine_data,)
             
         except Exception as e:
-            print(f"❌ IndexTTS-2 Engine error: {e}")
+            print(f"❌ IndexTTS Engine error: {e}")
             import traceback
             traceback.print_exc()
             
@@ -406,5 +451,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "IndexTTS Engine": "IndexTTS-2 Engine"
+    "IndexTTS Engine": "IndexTTS 2 / 2.5 Engine"
 }

@@ -78,11 +78,11 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                 }),
                 "max_chunk_duration": ("INT", {
                     "default": 30, "min": 0, "max": 300, "step": 5,
-                    "tooltip": "Maximum duration (in seconds) for each audio chunk. Prevents OOM on long audio. Set to 0 to disable chunking entirely (process full audio at once). Default 30s is safe for ChatterBox. RVC users can disable (0) or use higher values (60-120s). Increase if you have high VRAM (>16GB)."
+                    "tooltip": "Maximum duration (in seconds) for each audio chunk. Prevents OOM on long audio. Set to 0 to disable chunking entirely. Chunks are rejoined with timing-preserving concatenation, so smart splitting is recommended for cleaner joins."
                 }),
                 "chunk_method": (["smart", "fixed"], {
                     "default": "smart",
-                    "tooltip": "Chunking method: 'smart' splits at silences for natural boundaries, 'fixed' splits at exact time intervals. Smart mode produces better quality by avoiding mid-word cuts."
+                    "tooltip": "Chunk split method: 'smart' cuts near silence and is recommended for cleaner boundaries, while 'fixed' cuts at exact intervals and may make joins more audible."
                 }),
             }
         }
@@ -125,6 +125,8 @@ class UnifiedVoiceChangerNode(BaseVCNode):
             return normalized_audio
             
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
             raise ValueError(f"Failed to process {input_name}: {e}")
 
     def _handle_rvc_chunked_conversion(self, source_chunks, source_sample_rate, rvc_engine,
@@ -164,6 +166,10 @@ class UnifiedVoiceChangerNode(BaseVCNode):
         for i, chunk in enumerate(source_chunks, 1):
             print(f"🔄 Processing chunk {i}/{total_chunks}...")
 
+            if chunk is None or chunk.shape[-1] == 0:
+                print(f"⚠️ Skipping empty RVC chunk {i}/{total_chunks}")
+                continue
+
             # Wrap chunk in AUDIO dict format
             chunk_audio_dict = {
                 "waveform": chunk,
@@ -198,18 +204,24 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                     hubert_path=config.get('hubert_path'),
                 )
 
+                if converted_audio_np is None:
+                    raise RuntimeError(f"RVC conversion returned no audio for chunk {i}/{total_chunks}, pass {iteration_num}/{refinement_passes}")
+
                 current_audio_np = converted_audio_np
 
             # Convert final result back to tensor
             converted_audio_dict = self._convert_audio_from_rvc(converted_audio_np, output_sample_rate)
             converted_chunks.append(converted_audio_dict["waveform"])
 
-        # Combine chunks with crossfade
-        print(f"🔗 Combining {total_chunks} converted chunks with crossfade...")
+        if not converted_chunks:
+            raise RuntimeError("RVC chunked conversion produced no usable audio chunks")
+
+        # Keep exact duration across chunk boundaries for downstream sync-sensitive workflows
+        # (e.g., RVC training datasets). Crossfade removes overlap and shortens total runtime.
+        print(f"🔗 Combining {total_chunks} converted chunks with timing-safe concatenation...")
         combined_waveform = ChunkCombiner.combine_chunks(
             converted_chunks,
-            method="crossfade",
-            crossfade_duration=0.05,
+            method="concatenate",
             sample_rate=output_sample_rate
         )
 
@@ -225,7 +237,7 @@ class UnifiedVoiceChangerNode(BaseVCNode):
             f"RVC Conversion: {model_name} model | "
             f"Pitch: {config.get('pitch_shift', 0)} | "
             f"Method: {config.get('f0_method', 'rmvpe')} | "
-            f"Chunking: {total_chunks} chunks ({chunk_method} mode, {max_chunk_duration}s max) | "
+            f"Chunking: {total_chunks} chunks ({chunk_method} mode, {max_chunk_duration}s max, concat join) | "
             f"Refinement passes: {refinement_passes} | "
             f"Device: {config.get('device', 'auto')}"
         )
@@ -252,6 +264,8 @@ class UnifiedVoiceChangerNode(BaseVCNode):
         try:
             # Extract audio data from flexible inputs
             processed_source_audio = self._extract_audio_from_input(source_audio, "source_audio")
+            config = getattr(rvc_engine, 'config', {})
+            enable_custom_chunking = bool(config.get('enable_custom_chunking', False))
 
             # Get sample rate and waveform for chunking analysis
             source_sample_rate = processed_source_audio.get("sample_rate", 22050)
@@ -259,13 +273,21 @@ class UnifiedVoiceChangerNode(BaseVCNode):
             if source_waveform is None:
                 raise ValueError("Source audio missing waveform data")
 
-            # Check if chunking is needed
-            source_chunks = self._split_audio_into_chunks(
-                source_waveform,
-                source_sample_rate,
-                max_chunk_duration,
-                chunk_method
-            )
+            if enable_custom_chunking:
+                # Optional extra VRAM guard on top of native RVC segmentation.
+                source_chunks = self._split_audio_into_chunks(
+                    source_waveform,
+                    source_sample_rate,
+                    max_chunk_duration,
+                    chunk_method
+                )
+            else:
+                duration = source_waveform.shape[-1] / source_sample_rate
+                print(
+                    f"📊 RVC outer chunking disabled - using native RVC segmentation only "
+                    f"({duration:.1f}s input)"
+                )
+                source_chunks = [source_waveform]
 
             # If chunking is active, process chunks separately
             if len(source_chunks) > 1:
@@ -288,9 +310,6 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                 print("⚠️  Warning: narrator_target should be RVC Character Model for RVC conversion")
                 print("🔄 Attempting conversion without specific model...")
 
-            # Get RVC configuration from engine
-            config = getattr(rvc_engine, 'config', {})
-            
             # Generate cache key for this conversion
             cache_key = self._generate_rvc_cache_key(processed_source_audio, rvc_model, config)
             
@@ -351,6 +370,7 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                     f"Pitch: {config.get('pitch_shift', 0)} | "
                     f"Method: {config.get('f0_method', 'rmvpe')} | "
                     f"Index Rate: {config.get('index_rate', 0.75)} | "
+                    f"Chunking: {'native RVC only' if not enable_custom_chunking else 'custom outer chunking'} | "
                     f"Device: {config.get('device', 'auto')} | "
                     f"Pass: {iteration_num}/{refinement_passes}"
                 )
@@ -367,6 +387,7 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                 f"Pitch: {config.get('pitch_shift', 0)} | "
                 f"Method: {config.get('f0_method', 'rmvpe')} | "
                 f"Index Rate: {config.get('index_rate', 0.75)} | "
+                f"Chunking: {'native RVC only' if not enable_custom_chunking else f'custom outer chunking ({chunk_method}, {max_chunk_duration}s max)'} | "
                 f"Device: {config.get('device', 'auto')} | "
                 f"Refinement passes: {refinement_passes} {cache_info}"
             )
@@ -375,6 +396,8 @@ class UnifiedVoiceChangerNode(BaseVCNode):
             return converted_audio, final_conversion_info
             
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
             print(f"❌ RVC voice conversion failed: {e}")
             raise RuntimeError(f"RVC voice conversion failed: {e}")
 
@@ -403,14 +426,15 @@ class UnifiedVoiceChangerNode(BaseVCNode):
             else:
                 audio_np = waveform
             
+            # Collapse singleton dimensions first. Chunked audio commonly arrives as [1, 1, samples].
+            audio_np = np.squeeze(audio_np)
+
             # Ensure mono audio - RVC expects 1D audio
             if audio_np.ndim > 1:
-                if audio_np.shape[0] == 1:  # (1, samples)
-                    audio_np = audio_np[0]
-                elif audio_np.shape[1] == 1:  # (samples, 1)
-                    audio_np = audio_np[:, 0]
-                else:  # Multiple channels
-                    audio_np = audio_np.mean(axis=0 if audio_np.shape[0] < audio_np.shape[1] else 1)
+                audio_np = audio_np.mean(axis=0 if audio_np.shape[0] < audio_np.shape[1] else 1)
+
+            if audio_np.ndim == 0 or audio_np.size == 0:
+                raise ValueError("Source audio chunk is empty after normalization for RVC conversion")
             
             return (audio_np, sample_rate)
             
@@ -423,6 +447,9 @@ class UnifiedVoiceChangerNode(BaseVCNode):
             # Ensure numpy array
             if not isinstance(audio_np, np.ndarray):
                 audio_np = np.array(audio_np)
+
+            if audio_np.size == 0:
+                raise ValueError("RVC returned empty audio")
             
             # Ensure float32 in range [-1, 1]
             if audio_np.dtype != np.float32:
@@ -573,6 +600,8 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                 raise ValueError(f"Engine type '{engine_type}' does not support voice conversion. Currently supported: ChatterBox, CosyVoice")
                 
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
             print(f"❌ Failed to create engine VC node instance: {e}")
             return None
 
@@ -700,6 +729,7 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                 chunks[-2] = torch.cat([chunks[-2], chunks[-1]], dim=-1)
                 chunks.pop()
 
+        chunks = [chunk for chunk in chunks if chunk is not None and chunk.shape[-1] > 0]
         print(f"📦 Created {len(chunks)} smart chunks")
         return chunks
 
@@ -726,6 +756,9 @@ class UnifiedVoiceChangerNode(BaseVCNode):
         for start_sample in range(0, total_samples, chunk_samples):
             end_sample = min(start_sample + chunk_samples, total_samples)
             chunk = audio[:, :, start_sample:end_sample]
+
+            if chunk.shape[-1] == 0:
+                continue
 
             # Check if this is the last chunk and it's too small
             chunk_duration = chunk.shape[-1] / sample_rate
@@ -828,12 +861,11 @@ class UnifiedVoiceChangerNode(BaseVCNode):
         else:
             print(f"🔊 Output sample rate: {output_sample_rate}Hz")
 
-        # Combine chunks using crossfade for smooth transitions
-        print(f"🔗 Combining {total_chunks} converted chunks with crossfade...")
+        # Preserve exact duration across chunk boundaries for consistent sync behavior.
+        print(f"🔗 Combining {total_chunks} converted chunks with timing-safe concatenation...")
         combined_audio = ChunkCombiner.combine_chunks(
             converted_chunks,
-            method="crossfade",
-            crossfade_duration=0.05,  # 50ms crossfade for smooth transitions
+            method="concatenate",
             sample_rate=output_sample_rate
         )
 
@@ -967,7 +999,7 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                 
                 chunking_info = ""
                 if len(source_chunks) > 1:
-                    chunking_info = f"Chunking: {len(source_chunks)} chunks ({chunk_method} mode, {max_chunk_duration}s max)\n"
+                    chunking_info = f"Chunking: {len(source_chunks)} chunks ({chunk_method} mode, {max_chunk_duration}s max, concat join)\n"
 
                 conversion_info = (
                     f"🔄 Voice Changer (Unified) - CHATTERBOX Engine:\n"
@@ -1034,7 +1066,7 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                 
                 chunking_info = ""
                 if len(source_chunks) > 1:
-                    chunking_info = f"Chunking: {len(source_chunks)} chunks ({chunk_method} mode, {max_chunk_duration}s max)\n"
+                    chunking_info = f"Chunking: {len(source_chunks)} chunks ({chunk_method} mode, {max_chunk_duration}s max, concat join)\n"
 
                 conversion_info = (
                     f"🔄 Voice Changer (Unified) - CHATTERBOX OFFICIAL 23-LANG Engine:\n"
@@ -1069,7 +1101,7 @@ class UnifiedVoiceChangerNode(BaseVCNode):
                         "sample_rate": output_sample_rate
                     }
 
-                    chunking_info = f"Chunking: {len(source_chunks)} chunks ({chunk_method} mode, {max_chunk_duration}s max)\n"
+                    chunking_info = f"Chunking: {len(source_chunks)} chunks ({chunk_method} mode, {max_chunk_duration}s max, concat join)\n"
                     conversion_info = (
                         f"🔄 Voice Changer (Unified) - COSYVOICE3 Engine:\n"
                         f"Model: {config.get('model_path', 'Unknown')}\n"
@@ -1101,6 +1133,8 @@ class UnifiedVoiceChangerNode(BaseVCNode):
             return (converted_audio, conversion_info)
                 
         except Exception as e:
+            if isinstance(e, InterruptedError):
+                raise
             error_msg = f"❌ Voice conversion failed: {e}"
             print(error_msg)
             import traceback

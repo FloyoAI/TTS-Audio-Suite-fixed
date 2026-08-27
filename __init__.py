@@ -16,6 +16,48 @@ import importlib.util
 import os
 import sys
 
+# ComfyUI 0.12+ owns a top-level ``utils`` package, while this long-standing
+# node pack also imports its helpers through ``utils.*``. Preserve ComfyUI's
+# loaded package and extend only its module search path with this pack's utils.
+_project_root = os.path.dirname(__file__)
+_suite_utils_root = os.path.abspath(os.path.join(_project_root, "utils"))
+if _project_root in sys.path:
+    sys.path.remove(_project_root)
+sys.path.insert(0, _project_root)
+
+_loaded_utils = sys.modules.get("utils")
+if _loaded_utils is None:
+    import utils as _loaded_utils
+
+_utils_search_path = getattr(_loaded_utils, "__path__", None)
+if _utils_search_path is None:
+    raise ImportError(
+        "TTS Audio Suite cannot extend the loaded top-level 'utils' module because it is not a package"
+    )
+
+_normalized_utils_paths = {os.path.normcase(os.path.abspath(path)) for path in _utils_search_path}
+if os.path.normcase(_suite_utils_root) not in _normalized_utils_paths:
+    _utils_search_path.insert(0, _suite_utils_root)
+
+# When this pack is imported before ComfyUI imports its own helpers, locate the
+# active ComfyUI utils directory by its stable core modules and add it as the
+# fallback side of the same package search path.
+for _search_root in sys.path:
+    _candidate_utils = os.path.abspath(os.path.join(_search_root or os.curdir, "utils"))
+    _normalized_candidate = os.path.normcase(_candidate_utils)
+    if _normalized_candidate in _normalized_utils_paths or _normalized_candidate == os.path.normcase(_suite_utils_root):
+        continue
+    if all(os.path.isfile(os.path.join(_candidate_utils, filename)) for filename in ("extra_config.py", "install_util.py")):
+        _utils_search_path.append(_candidate_utils)
+        _normalized_utils_paths.add(_normalized_candidate)
+
+from utils.hf_download_logging import configure_hf_download_logging
+
+
+# Keep every engine's Hugging Face download output readable. Download failures
+# are still reported by the suite's downloader error handling.
+configure_hf_download_logging()
+
 # Note: PyTorch inductor patches removed - not needed for PyTorch 2.10+ with triton-windows 3.6+
 # Qwen3-TTS torch.compile optimizations require:
 # - PyTorch 2.10.0+ with CUDA 13.0
@@ -114,8 +156,9 @@ def check_dependencies():
         print(f"{'='*80}")
         print(f"The following required packages are missing: {', '.join(missing)}")
         print(f"")
-        print(f"Please run the installation script or install them manually:")
-        print(f"pip install -r requirements.txt")
+        install_script = os.path.join(os.path.dirname(__file__), "install.py")
+        print(f"Please run the TTS Audio Suite installation script:")
+        print(f'"{sys.executable}" "{install_script}"')
         print(f"{'='*80}\n")
 
 # Version disclosure for troubleshooting
@@ -149,32 +192,6 @@ def print_critical_versions():
 
     print(f"ℹ️ Critical package versions: {', '.join(version_info)}")
 
-def warn_transformers_5_unsupported():
-    """Warn when Transformers 5.x is installed (Qwen3-TTS tokenizer is incompatible).
-
-    NOTE: This check uses sys.modules to avoid eagerly importing transformers (~1.3s).
-    If transformers hasn't been imported yet (e.g. by the version-printing function above),
-    we skip the check -- it will be caught later when an engine actually loads transformers.
-    """
-    try:
-        # Only check if transformers is already loaded (avoids ~1.3s eager import)
-        import sys as _sys
-        if 'transformers' not in _sys.modules:
-            return
-        transformers = _sys.modules['transformers']
-        try:
-            from packaging.version import Version
-            version = Version(transformers.__version__)
-            is_5x = version >= Version("5.0.0")
-        except Exception:
-            parts = transformers.__version__.split(".")
-            is_5x = int(parts[0]) >= 5 if parts and parts[0].isdigit() else False
-        if is_5x:
-            print("⚠️ Transformers 5.x detected: Qwen3-TTS tokenizer is incompatible.")
-            print("   Please downgrade to transformers<=4.57.3 (see requirements.txt).")
-    except Exception:
-        pass
-
 def check_ffmpeg_availability():
     """Check ffmpeg availability and log status"""
     try:
@@ -207,7 +224,6 @@ def check_ffmpeg_availability():
 # Print versions and check dependencies immediately for troubleshooting
 check_dependencies()
 print_critical_versions()
-warn_transformers_5_unsupported()
 check_ffmpeg_availability()
 
 # Check for old ChatterBox extension conflict
@@ -282,24 +298,33 @@ if 'utils' in sys.modules:
         for key in to_delete:
             del sys.modules[key]
 
-# Get the path to the nodes.py file
-nodes_py_path = os.path.join(os.path.dirname(__file__), "nodes.py")
+# In pytest harness mode, avoid bootstrapping full ComfyUI node graph.
+if os.environ.get("COMFYUI_TESTING") == "1":
+    IS_DEV = False
+    VERSION = "test"
+    SEPARATOR = "=" * 70
+    VERSION_DISPLAY = "test"
+    NODE_CLASS_MAPPINGS = {}
+    NODE_DISPLAY_NAME_MAPPINGS = {}
+else:
+    # Get the path to the nodes.py file
+    nodes_py_path = os.path.join(os.path.dirname(__file__), "nodes.py")
 
-# Load nodes.py as a module
-spec = importlib.util.spec_from_file_location("nodes_main", nodes_py_path)
-nodes_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(nodes_module)
+    # Load nodes.py as a module
+    spec = importlib.util.spec_from_file_location("nodes_main", nodes_py_path)
+    nodes_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nodes_module)
 
-# Import constants and utilities
-IS_DEV = nodes_module.IS_DEV
-VERSION = nodes_module.VERSION
-SEPARATOR = nodes_module.SEPARATOR
-VERSION_DISPLAY = nodes_module.VERSION_DISPLAY
+    # Import constants and utilities
+    IS_DEV = nodes_module.IS_DEV
+    VERSION = nodes_module.VERSION
+    SEPARATOR = nodes_module.SEPARATOR
+    VERSION_DISPLAY = nodes_module.VERSION_DISPLAY
 
-# The new unified architecture handles all node registration in nodes.py
-# Just import the mappings that nodes.py creates
-NODE_CLASS_MAPPINGS = nodes_module.NODE_CLASS_MAPPINGS
-NODE_DISPLAY_NAME_MAPPINGS = nodes_module.NODE_DISPLAY_NAME_MAPPINGS
+    # The new unified architecture handles all node registration in nodes.py
+    # Just import the mappings that nodes.py creates
+    NODE_CLASS_MAPPINGS = nodes_module.NODE_CLASS_MAPPINGS
+    NODE_DISPLAY_NAME_MAPPINGS = nodes_module.NODE_DISPLAY_NAME_MAPPINGS
 
 # Extension info
 __version__ = VERSION_DISPLAY
@@ -316,22 +341,53 @@ def setup_api_routes():
     """Setup API routes for widget communication"""
     try:
         import json
+        import folder_paths
         from server import PromptServer
         from aiohttp import web
+
+        def _get_ui_data_dir():
+            base_dir = os.path.join(folder_paths.get_system_user_directory("tts_audio_suite"), "ui")
+            os.makedirs(base_dir, exist_ok=True)
+            return base_dir
+
+        def _get_omnivoice_preset_library_path():
+            return os.path.join(_get_ui_data_dir(), "omnivoice_instruction_builder_presets.json")
+
+        from utils.voice.alias_api import register_character_alias_routes
+        register_character_alias_routes(PromptServer.instance.routes, web)
+
+        @PromptServer.instance.routes.get("/api/tts-audio-suite/index-tts-emotion-presets")
+        async def get_index_tts_emotion_presets_endpoint(request):
+            """Return presets stored beside the IndexTTS resources under models/TTS."""
+            try:
+                from .utils.text.index_tts_emotion import load_emotion_presets
+                return web.json_response({"presets": load_emotion_presets()})
+            except Exception as e:
+                print(f"⚠️ Error retrieving IndexTTS emotion presets: {e}")
+                return web.json_response({"presets": {}, "error": str(e)}, status=500)
+
+        @PromptServer.instance.routes.post("/api/tts-audio-suite/index-tts-emotion-presets")
+        async def save_index_tts_emotion_presets_endpoint(request):
+            """Atomically persist the IndexTTS emotion preset library."""
+            try:
+                from .utils.text.index_tts_emotion import save_emotion_presets
+                data = await request.json()
+                presets = data.get("presets", {})
+                path = save_emotion_presets(presets)
+                return web.json_response({"status": "success", "count": len(presets), "path": path})
+            except ValueError as e:
+                return web.json_response({"error": str(e)}, status=400)
+            except Exception as e:
+                print(f"⚠️ Error saving IndexTTS emotion presets: {e}")
+                return web.json_response({"status": "error", "error": str(e)}, status=500)
 
         @PromptServer.instance.routes.get("/api/tts-audio-suite/available-characters")
         async def get_available_characters_endpoint(request):
             """API endpoint to get available TTS character voices including aliases"""
             try:
-                # Load voice discovery directly by file path to avoid package import issues
-                voice_discovery_path = os.path.join(os.path.dirname(__file__), "utils", "voice", "discovery.py")
-                spec = importlib.util.spec_from_file_location("voice_discovery_module", voice_discovery_path)
-                voice_discovery_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(voice_discovery_module)
-
+                from utils.voice import discovery as voice_discovery_module
                 characters = list(voice_discovery_module.get_available_characters())
-                # Also get character aliases
-                aliases = list(voice_discovery_module.voice_discovery._character_aliases.keys()) if hasattr(voice_discovery_module.voice_discovery, '_character_aliases') else []
+                aliases = list(voice_discovery_module.voice_discovery.get_character_aliases().keys())
                 # Combine and deduplicate
                 all_chars = sorted(set(characters + aliases))
                 return web.json_response({"characters": all_chars})
@@ -356,6 +412,53 @@ def setup_api_routes():
                 print(f"⚠️ Error retrieving available languages: {e}")
                 # Fallback list
                 return web.json_response({"languages": ["en", "de", "fr", "ja", "es", "it", "pt", "th", "no"], "error": str(e)})
+
+        @PromptServer.instance.routes.get("/api/tts-audio-suite/omnivoice-presets")
+        async def get_omnivoice_presets_endpoint(request):
+            """Return the persisted OmniVoice instruction builder preset library."""
+            try:
+                library_path = _get_omnivoice_preset_library_path()
+                if not os.path.exists(library_path):
+                    return web.json_response({"presets": [], "builtinStates": {}, "builtinLayouts": {}})
+                with open(library_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                presets = payload.get("presets", []) if isinstance(payload, dict) else []
+                builtin_states = payload.get("builtinStates", {}) if isinstance(payload, dict) else {}
+                builtin_layouts = payload.get("builtinLayouts", {}) if isinstance(payload, dict) else {}
+                if not isinstance(presets, list):
+                    presets = []
+                if not isinstance(builtin_states, dict):
+                    builtin_states = {}
+                if not isinstance(builtin_layouts, dict):
+                    builtin_layouts = {}
+                return web.json_response({"presets": presets, "builtinStates": builtin_states, "builtinLayouts": builtin_layouts})
+            except Exception as e:
+                print(f"⚠️ Error retrieving OmniVoice preset library: {e}")
+                return web.json_response({"presets": [], "builtinStates": {}, "builtinLayouts": {}, "error": str(e)}, status=500)
+
+        @PromptServer.instance.routes.post("/api/tts-audio-suite/omnivoice-presets")
+        async def save_omnivoice_presets_endpoint(request):
+            """Persist the OmniVoice instruction builder preset library."""
+            try:
+                data = await request.json()
+                presets = data.get("presets", [])
+                builtin_states = data.get("builtinStates", {})
+                builtin_layouts = data.get("builtinLayouts", {})
+                if not isinstance(presets, list):
+                    return web.json_response({"error": "presets must be a list"}, status=400)
+                if not isinstance(builtin_states, dict):
+                    return web.json_response({"error": "builtinStates must be an object"}, status=400)
+                if not isinstance(builtin_layouts, dict):
+                    return web.json_response({"error": "builtinLayouts must be an object"}, status=400)
+
+                library_path = _get_omnivoice_preset_library_path()
+                payload = {"presets": presets, "builtinStates": builtin_states, "builtinLayouts": builtin_layouts}
+                with open(library_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                return web.json_response({"status": "success", "count": len(presets)})
+            except Exception as e:
+                print(f"⚠️ Error saving OmniVoice preset library: {e}")
+                return web.json_response({"status": "error", "error": str(e)}, status=500)
 
         @PromptServer.instance.routes.get("/api/tts-audio-suite/voice-input-devices")
         async def get_voice_input_devices_endpoint(request):
@@ -451,6 +554,31 @@ print(json.dumps({"devices": devices}))
                 print(f"⚠️ Error setting inline tag settings: {e}")
                 return web.json_response({"status": "error", "error": str(e)})
 
+        def get_voice_discovery_module():
+            """Return the shared discovery module used by nodes and save notifications."""
+            from utils.voice import discovery as voice_discovery_module
+            return voice_discovery_module
+
+        def resolve_character_voice(voice_name):
+            """Resolve a dropdown key through the shared discovery cache."""
+            voice_discovery_module = get_voice_discovery_module()
+            voice_discovery_module.get_available_voices(force_refresh=False)
+            return voice_discovery_module.load_voice_reference(voice_name)
+
+        @PromptServer.instance.routes.get("/api/tts-audio-suite/voice-library")
+        async def get_voice_library_endpoint(request):
+            """Return current dropdown keys for Character Voices."""
+            try:
+                voice_discovery_module = get_voice_discovery_module()
+                force_refresh = request.query.get("refresh", "0").strip().lower() in {"1", "true", "yes"}
+                voices = voice_discovery_module.get_available_voices(force_refresh=force_refresh)
+                response = web.json_response({"voices": voices})
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+                return response
+            except Exception as e:
+                print(f"⚠️ Error serving voice library: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
         @PromptServer.instance.routes.get("/api/tts-audio-suite/voice-preview")
         async def get_voice_preview_endpoint(request):
             """
@@ -464,15 +592,7 @@ print(json.dumps({"devices": devices}))
                 if not voice_name or voice_name == "none":
                     return web.json_response({"error": "voice_name is required and cannot be 'none'"}, status=400)
 
-                # Load voice discovery directly by file path to avoid package import issues
-                voice_discovery_path = os.path.join(os.path.dirname(__file__), "utils", "voice", "discovery.py")
-                spec = importlib.util.spec_from_file_location("voice_discovery_module", voice_discovery_path)
-                voice_discovery_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(voice_discovery_module)
-
-                # Use cached discovery for fast preview playback.
-                voice_discovery_module.get_available_voices(force_refresh=False)
-                audio_path, _ = voice_discovery_module.load_voice_reference(voice_name)
+                audio_path, _ = resolve_character_voice(voice_name)
 
                 if not audio_path or not os.path.exists(audio_path):
                     return web.json_response({"error": f"Voice file not found: {voice_name}"}, status=404)
@@ -483,6 +603,75 @@ print(json.dumps({"devices": devices}))
                 return response
             except Exception as e:
                 print(f"⚠️ Error serving voice preview audio: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        @PromptServer.instance.routes.get("/api/tts-audio-suite/voice-info")
+        async def get_voice_info_endpoint(request):
+            """Return canonical metadata for a Character Voices dropdown entry."""
+            try:
+                voice_name = request.query.get("voice_name", "").strip()
+                if not voice_name or voice_name == "none":
+                    return web.json_response({"error": "voice_name is required and cannot be 'none'"}, status=400)
+
+                audio_path, reference_text = resolve_character_voice(voice_name)
+                if not audio_path or not os.path.exists(audio_path):
+                    return web.json_response({"error": f"Voice file not found: {voice_name}"}, status=404)
+
+                response = web.json_response({
+                    "voice_name": voice_name,
+                    "reference_text": reference_text or "",
+                })
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+                return response
+            except Exception as e:
+                print(f"⚠️ Error serving voice metadata: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        @PromptServer.instance.routes.post("/api/tts-audio-suite/audio-analyzer-preview")
+        async def audio_analyzer_preview_endpoint(request):
+            """
+            Analyze file-based Audio Wave Analyzer inputs without queueing the ComfyUI graph.
+
+            Connected AUDIO inputs still require graph execution because the browser/backend
+            route cannot access an upstream tensor that has not been computed.
+            """
+            try:
+                data = await request.json()
+                audio_file = (data.get("audio_file") or "").strip()
+                if not audio_file:
+                    return web.json_response({"error": "audio_file is required for preview analysis"}, status=400)
+
+                node_id = str(data.get("node_id") or "preview")
+
+                analyzer_node_path = os.path.join(os.path.dirname(__file__), "nodes", "audio", "analyzer_node.py")
+                spec = importlib.util.spec_from_file_location("tts_audio_suite_audio_analyzer_node", analyzer_node_path)
+                analyzer_node_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(analyzer_node_module)
+
+                analyzer_node = analyzer_node_module.AudioAnalyzerNode()
+                analyzer_node.analyze_audio(
+                    audio_file=audio_file,
+                    analysis_method=data.get("analysis_method", "silence"),
+                    precision_level=data.get("precision_level", "milliseconds"),
+                    visualization_points=int(data.get("visualization_points", 2000)),
+                    audio=None,
+                    options=data.get("options"),
+                    manual_regions=data.get("manual_regions", ""),
+                    region_labels=data.get("region_labels", ""),
+                    export_format=data.get("export_format", "f5tts"),
+                    node_id=node_id,
+                )
+
+                import folder_paths
+                cache_file = os.path.join(folder_paths.get_output_directory(), f"audio_analyzer_cache_{node_id}.json")
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+
+                response = web.json_response(payload)
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+                return response
+            except Exception as e:
+                print(f"⚠️ Audio analyzer preview failed: {e}")
                 return web.json_response({"error": str(e)}, status=500)
 
         @PromptServer.instance.routes.get("/api/tts-audio-suite/training-progress")

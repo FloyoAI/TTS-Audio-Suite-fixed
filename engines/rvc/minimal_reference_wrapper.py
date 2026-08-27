@@ -113,6 +113,15 @@ def _stack(arrays, axis=0):
     return np.stack(arrays, axis=axis)
 
 
+def _deprecated(*args, **kwargs):
+    def decorator(func):
+        return func
+
+    if args and callable(args[0]) and len(args) == 1 and not kwargs:
+        return args[0]
+    return decorator
+
+
 _LIBROSA_UTIL_FALLBACKS = {
     "normalize": _normalize,
     "pad_center": _pad_center,
@@ -125,9 +134,17 @@ _LIBROSA_UTIL_FALLBACKS = {
 }
 
 
+def _build_librosa_decorators_fallback_module():
+    decorators_module = types.ModuleType("librosa.util.decorators")
+    decorators_module.deprecated = _deprecated
+    return decorators_module
+
+
 def _build_librosa_util_fallback_module():
     util_module = types.ModuleType("librosa.util")
+    util_module.__path__ = []
     util_module.__dict__.update(_LIBROSA_UTIL_FALLBACKS)
+    util_module.decorators = _build_librosa_decorators_fallback_module()
     return util_module
 
 
@@ -152,6 +169,7 @@ def apply_librosa_compatibility_patches():
         return True
     except Exception as e:
         util_module = _build_librosa_util_fallback_module()
+        sys.modules["librosa.util.decorators"] = util_module.decorators
         sys.modules["librosa.util"] = util_module
         librosa.util = util_module
         print(f"🔧 RVC: Using bundled librosa.util fallback ({e})")
@@ -322,6 +340,34 @@ class MinimalRVCWrapper:
             sys.path.insert(0, self.lib_path)        # For infer_pack, utils, etc.
         if self.reference_path not in sys.path:
             sys.path.insert(0, self.reference_path)  # For config, vc_infer_pipeline, etc.
+
+    @staticmethod
+    def _get_rvc_feature_dim(model_data) -> int:
+        """Read the HuBERT feature width required by a loaded RVC checkpoint."""
+        cpt = model_data.get("cpt", {}) if isinstance(model_data, dict) else {}
+        input_weight = cpt.get("weight", {}).get("enc_p.emb_phone.weight")
+        if input_weight is not None and getattr(input_weight, "ndim", 0) == 2:
+            return int(input_weight.shape[1])
+        return int(cpt.get("feature_dim", 768) or 768)
+
+    def _resolve_auto_hubert(self, model_data) -> Optional[str]:
+        """Select/download the encoder matching the loaded RVC voice model."""
+        feature_dim = self._get_rvc_feature_dim(model_data)
+        if feature_dim not in (768, 1024):
+            raise ValueError(
+                f"Unsupported RVC HuBERT feature dimension: {feature_dim}. "
+                "Expected a 768- or 1024-dimensional checkpoint."
+            )
+
+        model_key = "hubert-large" if feature_dim == 1024 else "content-vec-best"
+        from engines.rvc.hubert_downloader import ensure_hubert_model
+        hubert_path = ensure_hubert_model(model_key)
+        if hubert_path:
+            print(
+                f"✅ Auto-selected HuBERT for {feature_dim}-dimensional RVC model: "
+                f"{os.path.basename(hubert_path)}"
+            )
+        return hubert_path
     
     def convert_voice(self,
                      audio: np.ndarray,
@@ -399,9 +445,11 @@ class MinimalRVCWrapper:
                 # CRITICAL: Register with ComfyUI model management so Clear VRAM button can see it
                 self._register_rvc_model_with_comfyui(model_data, model_path)
 
-            # Load Hubert model (with caching)
-            # Respect user's hubert_path selection from RVC Engine node, fallback to auto-detection
-            hubert_path = kwargs.get('hubert_path') or self._find_hubert_model()
+            # Load Hubert model (with caching). Auto-selection is deferred until
+            # now because the separate RVC checkpoint determines 768 vs 1024.
+            hubert_path = kwargs.get('hubert_path')
+            if not hubert_path:
+                hubert_path = self._resolve_auto_hubert(model_data)
             if not hubert_path:
                 print("❌ Hubert model not found")
                 return None
