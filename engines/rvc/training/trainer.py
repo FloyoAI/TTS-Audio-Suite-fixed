@@ -26,7 +26,7 @@ from engines.training.progress_registry import (
     update_training_job,
 )
 from utils.downloads.unified_downloader import unified_downloader
-from utils.models.extra_paths import find_model_in_paths, get_all_tts_model_paths
+from utils.models.extra_paths import find_model_in_paths, get_all_tts_model_paths, get_preferred_loras_path
 
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
@@ -198,7 +198,7 @@ def _prepare_output_paths(
 ) -> Tuple[str, str, str]:
     safe_name = _slugify(output_name or dataset_info.get("model_name") or "rvc_model")
     sample_rate = dataset_info["sample_rate"]
-    models_root = os.path.join(folder_paths.models_dir, "TTS", "RVC")
+    models_root = get_preferred_loras_path()
     index_root = os.path.join(models_root, ".index")
     training_root = os.path.join(folder_paths.get_output_directory(), "tts_audio_suite_training", "rvc", "jobs")
     os.makedirs(models_root, exist_ok=True)
@@ -543,7 +543,7 @@ def run_rvc_training_job(
                     dataset_dir=dataset_info["dataset_dir"],
                     sample_rate=sample_rate,
                     model_name=resolved_name,
-                    index_dir=os.path.join(folder_paths.models_dir, "TTS", "RVC", ".index"),
+                    index_dir=os.path.join(get_preferred_loras_path(), ".index"),
                     overwrite=overwrite,
                     feature_dim=hparams.model.phone_dim,
                 )

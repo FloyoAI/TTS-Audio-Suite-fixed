@@ -54,8 +54,9 @@ class RVCEngineNode(BaseTTSNode):
         try:
             import folder_paths
 
-            # Look for RVC models - try TTS path first, then legacy
+            # Look for RVC models - trained models live in models/loras, base/legacy stay under TTS/RVC
             rvc_search_paths = [
+                os.path.join(folder_paths.models_dir, "loras"),
                 os.path.join(folder_paths.models_dir, "TTS", "RVC"),
                 os.path.join(folder_paths.models_dir, "RVC")  # Legacy
             ]

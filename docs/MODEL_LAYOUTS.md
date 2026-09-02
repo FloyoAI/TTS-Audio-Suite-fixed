@@ -174,6 +174,7 @@ Notes:
 
 - Base models auto-download.
 - Character `.pth` models can be auto-downloaded defaults or user-provided.
+- Trained character `.pth` models and their `.index` files are written to `ComfyUI/models/loras/` (indexes in `ComfyUI/models/loras/.index/`).
 - `pretrained_v2/` is used by the integrated RVC trainer and auto-downloads on first training run.
 - Training datasets, logs, progress snapshots, and resumable checkpoints are stored under `ComfyUI/output/tts_audio_suite_training/rvc/`, not inside the custom node repo.
 - UVR models are downloaded under `ComfyUI/models/TTS/UVR/` (or legacy `ComfyUI/models/UVR/`).
@@ -301,10 +302,15 @@ ComfyUI/models/TTS/moss_tts/
 ├── MOSS-SoundEffect/
 ├── MOSS-TTSD-v1.0/
 ├── MOSS-Audio-Tokenizer/
-└── loras/
-    └── <adapter_name>/
-        ├── adapter_config.json
-        └── adapter_model.safetensors
+```
+
+LoRA adapters (standard ComfyUI path):
+
+```text
+ComfyUI/models/loras/
+└── <adapter_name>/
+    ├── adapter_config.json
+    └── adapter_model.safetensors
 ```
 
 Notes:
@@ -318,7 +324,7 @@ Notes:
 - `MOSS-VoiceGenerator` is the 1.7B voice-design provider used by Voice Designer.
 - `MOSS-SoundEffect` is the v1 sound-effect checkpoint used through the MOSS-TTS engine and 🌩️ Sound Effects.
 - `MOSS-TTSD-v1.0` is the official 8B native multi-speaker dialogue model.
-- Integrated training currently exports LoRA adapters into `moss_tts/loras/<adapter_name>/`.
+- Integrated training currently exports LoRA adapters into `ComfyUI/models/loras/<adapter_name>/`.
 - Training jobs, temporary manifests, and checkpoints are stored under `ComfyUI/output/tts_audio_suite_training/moss_tts/`.
 
 ## MOSS-SoundEffect v2

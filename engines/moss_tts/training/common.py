@@ -15,7 +15,7 @@ import folder_paths
 
 from engines.moss_tts.moss_tts_downloader import MossTTSDownloader
 from engines.moss_tts.model_specs import MOSS_MODEL_SPECS
-from utils.models.extra_paths import get_all_tts_model_paths
+from utils.models.extra_paths import get_preferred_loras_path
 
 
 FRIENDLY_VARIANT_MAP = {
@@ -209,13 +209,7 @@ def get_moss_training_root() -> str:
 
 
 def get_managed_lora_root() -> str:
-    for base_path in get_all_tts_model_paths("TTS"):
-        candidate = os.path.join(base_path, "moss_tts", "loras")
-        os.makedirs(candidate, exist_ok=True)
-        return candidate
-    fallback = os.path.join(folder_paths.models_dir, "TTS", "moss_tts", "loras")
-    os.makedirs(fallback, exist_ok=True)
-    return fallback
+    return get_preferred_loras_path()
 
 
 def next_available_adapter_dir(base_name: str, overwrite: bool = False) -> str:

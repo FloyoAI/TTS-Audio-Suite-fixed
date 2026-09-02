@@ -25,7 +25,12 @@ base_spec.loader.exec_module(base_module)
 BaseTTSNode = base_module.BaseTTSNode
 
 from engines.moss_tts.moss_tts import MossTTSEngine
-from utils.models.extra_paths import get_all_tts_model_paths
+from utils.models.extra_paths import (
+    get_all_loras_paths,
+    get_all_tts_model_paths,
+    get_legacy_moss_lora_paths,
+    get_preferred_loras_path,
+)
 from utils.downloads.unified_downloader import UnifiedDownloader
 
 
@@ -304,7 +309,7 @@ class MossTTSEngineNode(BaseTTSNode):
                 "local_lora_adapter": (cls._get_ui_lora_options(), {
                     "default": cls.NO_LORA_OPTION,
                     "tooltip": (
-                        "Optional local MOSS LoRA adapter discovered under models/TTS/moss_tts/loras.\n"
+                        "Optional local MOSS LoRA adapter discovered under models/loras.\n"
                         "\n"
                         "Supported by MOSS-TTS v1/v1.5 and experimentally by MOSS-SoundEffect v1. "
                         "VoiceGenerator rejects TTS LoRAs; SoundEffect v2 is a separate engine.\n"
@@ -321,7 +326,7 @@ class MossTTSEngineNode(BaseTTSNode):
                         "Accepts a local adapter folder path or Hugging Face repo id.\n"
                         "Example: ToSee-Norway/MOSS-TTS-Norwegian-LoRA\n"
                         "\n"
-                        "If you enter a Hugging Face repo id, it will be installed into models/TTS/moss_tts/loras and then loaded locally.\n"
+                        "If you enter a Hugging Face repo id, it will be installed into models/loras and then loaded locally.\n"
                         "If this field is filled, it overrides the local LoRA dropdown."
                     )
                 }),
@@ -384,12 +389,23 @@ class MossTTSEngineNode(BaseTTSNode):
         return values
 
     @classmethod
+    def _iter_moss_lora_roots(cls) -> List[str]:
+        roots: List[str] = []
+        seen = set()
+        for root in list(get_all_loras_paths()) + get_legacy_moss_lora_paths():
+            normalized = os.path.normpath(root)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            roots.append(root)
+        return roots
+
+    @classmethod
     def _discover_local_lora_adapters(cls) -> List[str]:
         discovered: List[str] = []
         seen = set()
         try:
-            for base_path in get_all_tts_model_paths("TTS"):
-                lora_root = os.path.join(base_path, "moss_tts", "loras")
+            for lora_root in cls._iter_moss_lora_roots():
                 if not os.path.isdir(lora_root):
                     continue
                 for name in sorted(os.listdir(lora_root)):
@@ -412,12 +428,7 @@ class MossTTSEngineNode(BaseTTSNode):
 
     @classmethod
     def _get_moss_lora_root(cls) -> str:
-        from utils.models.extra_paths import get_preferred_download_path
-
-        moss_root = get_preferred_download_path("TTS", "moss_tts")
-        lora_root = os.path.join(moss_root, "loras")
-        os.makedirs(lora_root, exist_ok=True)
-        return lora_root
+        return get_preferred_loras_path()
 
     @classmethod
     def _repo_id_to_local_lora_name(cls, repo_id: str) -> str:
@@ -486,8 +497,8 @@ class MossTTSEngineNode(BaseTTSNode):
 
         if local_value.startswith("local:"):
             adapter_name = local_value.split(":", 1)[1]
-            for base_path in get_all_tts_model_paths("TTS"):
-                candidate = os.path.join(base_path, "moss_tts", "loras", adapter_name)
+            for lora_root in cls._iter_moss_lora_roots():
+                candidate = os.path.join(lora_root, adapter_name)
                 if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "adapter_config.json")):
                     return candidate
 

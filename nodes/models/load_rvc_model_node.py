@@ -99,7 +99,7 @@ class LoadRVCModelNode(BaseTTSNode):
     
     Usage:
     • Connect output to narrator_target on Voice Changer node
-    • Models can be organized in subfolders under ComfyUI/models/RVC/
+    • Models can be organized in subfolders under ComfyUI/models/loras/
     • Index files can sit beside their model or in an .index/ folder
     
     Model Guide:
@@ -196,6 +196,29 @@ class LoadRVCModelNode(BaseTTSNode):
                     relative_path = os.path.relpath(full_path, root_dir).replace(os.sep, "/")
                     yield relative_path, full_path
 
+    @staticmethod
+    def _iter_files_shallow(root_dir: str, suffix: str):
+        if not os.path.isdir(root_dir):
+            return
+        try:
+            names = os.listdir(root_dir)
+        except OSError:
+            return
+        for name in sorted(names):
+            full_path = os.path.join(root_dir, name)
+            if os.path.isfile(full_path) and name.lower().endswith(suffix):
+                yield name.replace(os.sep, "/"), full_path
+
+    @classmethod
+    def _iter_loras_search_dirs(cls):
+        try:
+            from utils.models.extra_paths import get_all_loras_paths
+            return list(get_all_loras_paths())
+        except Exception:
+            if folder_paths:
+                return [os.path.join(folder_paths.models_dir, "loras")]
+            return []
+
     @classmethod
     def _iter_local_rvc_index_paths(cls):
         seen = set()
@@ -203,6 +226,12 @@ class LoadRVCModelNode(BaseTTSNode):
 
         try:
             from utils.models.extra_paths import get_all_tts_model_paths
+
+            for loras_dir in cls._iter_loras_search_dirs():
+                search_dirs.extend([
+                    os.path.join(loras_dir, ".index"),
+                    loras_dir,
+                ])
 
             for base_path in get_all_tts_model_paths('TTS'):
                 search_dirs.extend([
@@ -215,18 +244,28 @@ class LoadRVCModelNode(BaseTTSNode):
         if folder_paths:
             models_dir = folder_paths.models_dir
             search_dirs.extend([
+                os.path.join(models_dir, "loras", ".index"),
+                os.path.join(models_dir, "loras"),
                 os.path.join(models_dir, "TTS", "RVC", ".index"),
                 os.path.join(models_dir, "TTS", "RVC"),
                 os.path.join(models_dir, "RVC", ".index"),
                 os.path.join(models_dir, "RVC"),
             ])
 
+        loras_dirs = {os.path.normpath(path) for path in cls._iter_loras_search_dirs()}
+        loras_index_dirs = {os.path.normpath(os.path.join(path, ".index")) for path in loras_dirs}
+
         for search_dir in search_dirs:
             normalized_dir = os.path.normpath(search_dir)
             if normalized_dir in seen or not os.path.isdir(search_dir):
                 continue
             seen.add(normalized_dir)
-            for _, index_path in cls._iter_files_recursive(search_dir, ".index"):
+            iterator = (
+                cls._iter_files_shallow(search_dir, ".index")
+                if normalized_dir in loras_dirs or normalized_dir in loras_index_dirs
+                else cls._iter_files_recursive(search_dir, ".index")
+            )
+            for _, index_path in iterator:
                 yield index_path
 
     @classmethod
@@ -348,6 +387,16 @@ class LoadRVCModelNode(BaseTTSNode):
                 "Monika.pth"
             ]
         
+        # Add local models from models/loras first (trained character models)
+        try:
+            for loras_dir in cls._iter_loras_search_dirs():
+                for relative_path, _ in cls._iter_files_shallow(loras_dir, ".pth"):
+                    local_model = f"local:{relative_path}"
+                    if local_model not in models:
+                        models.append(local_model)
+        except Exception:
+            pass
+
         # Add local models (respects extra_model_paths.yaml)
         try:
             from utils.models.extra_paths import get_all_tts_model_paths
@@ -403,6 +452,20 @@ class LoadRVCModelNode(BaseTTSNode):
                 "Sayano_v2_40k.index"
             ])
         
+        # Add local index files from models/loras
+        try:
+            for loras_dir in cls._iter_loras_search_dirs():
+                for relative_path, _ in cls._iter_files_shallow(loras_dir, ".index"):
+                    local_index = f"local:{relative_path}"
+                    if local_index not in indexes:
+                        indexes.append(local_index)
+                for relative_path, _ in cls._iter_files_shallow(os.path.join(loras_dir, ".index"), ".index"):
+                    local_index = f"local:.index/{relative_path}" if not relative_path.startswith(".index/") else f"local:{relative_path}"
+                    if local_index not in indexes:
+                        indexes.append(local_index)
+        except Exception:
+            pass
+
         # Add local index files (respects extra_model_paths.yaml)
         try:
             from utils.models.extra_paths import get_all_tts_model_paths
@@ -455,6 +518,11 @@ class LoadRVCModelNode(BaseTTSNode):
             if model_name.startswith("local:"):
                 actual_model_name = model_name.replace("local:", "")
 
+                for loras_dir in self._iter_loras_search_dirs():
+                    model_path = os.path.join(loras_dir, actual_model_name)
+                    if os.path.exists(model_path):
+                        return model_path
+
                 # Search in extra_model_paths.yaml first
                 try:
                     from utils.models.extra_paths import get_all_tts_model_paths
@@ -471,6 +539,7 @@ class LoadRVCModelNode(BaseTTSNode):
                 if folder_paths:
                     models_dir = folder_paths.models_dir
                     search_paths = [
+                        os.path.join(models_dir, "loras", actual_model_name),
                         os.path.join(models_dir, "TTS", "RVC", actual_model_name),
                         os.path.join(models_dir, "RVC", actual_model_name)  # Legacy
                     ]
@@ -480,18 +549,20 @@ class LoadRVCModelNode(BaseTTSNode):
                             return model_path
                 return None
             
-            # Regular downloadable model
+            # Regular downloadable or locally trained model
             if folder_paths:
                 models_dir = folder_paths.models_dir
-                # Try TTS path first, then legacy
+                loras_path = os.path.join(models_dir, "loras", model_name)
                 tts_path = os.path.join(models_dir, "TTS", "RVC", model_name)
                 legacy_path = os.path.join(models_dir, "RVC", model_name)
-                
+
+                if os.path.exists(loras_path):
+                    return loras_path
                 if os.path.exists(tts_path):
                     return tts_path
-                elif os.path.exists(legacy_path):
+                if os.path.exists(legacy_path):
                     return legacy_path
-                    
+
                 # Auto-download if enabled - download to TTS path
                 if auto_download:
                     downloaded_path = self._download_rvc_model(model_name, tts_path)
@@ -509,6 +580,15 @@ class LoadRVCModelNode(BaseTTSNode):
             # Handle local: prefix (like F5-TTS pattern)
             if index_name.startswith("local:"):
                 actual_index_name = index_name.replace("local:", "")
+
+                for loras_dir in self._iter_loras_search_dirs():
+                    index_paths = [
+                        os.path.join(loras_dir, ".index", actual_index_name.replace(".index/", "")),
+                        os.path.join(loras_dir, actual_index_name),
+                    ]
+                    for index_path in index_paths:
+                        if os.path.exists(index_path):
+                            return index_path
 
                 # Search in extra_model_paths.yaml first
                 try:

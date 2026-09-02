@@ -248,6 +248,45 @@ def get_all_voices_paths() -> List[str]:
     """Get all configured voice search paths"""
     return _tts_paths_manager.get_all_voices_paths()
 
+
+def get_all_loras_paths() -> List[str]:
+    """Return ComfyUI's registered models/loras directories."""
+    loras_dirs: List[str] = []
+    try:
+        loras_dirs = list(folder_paths.get_folder_paths("loras"))
+    except Exception:
+        pass
+    if not loras_dirs:
+        models_dir = getattr(folder_paths, "models_dir", None)
+        if models_dir:
+            loras_dirs = [os.path.join(models_dir, "loras")]
+    return [path for path in loras_dirs if path]
+
+
+def get_preferred_loras_path() -> str:
+    """Primary ComfyUI loras directory for new LoRA/adapter/training output."""
+    paths = get_all_loras_paths()
+    if paths:
+        os.makedirs(paths[0], exist_ok=True)
+        return paths[0]
+    fallback = os.path.join(folder_paths.models_dir, "loras")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+
+def get_legacy_moss_lora_paths() -> List[str]:
+    """Previous MOSS adapter location, kept as a discovery fallback."""
+    paths: List[str] = []
+    seen = set()
+    for base_path in get_all_tts_model_paths("TTS"):
+        candidate = os.path.join(base_path, "moss_tts", "loras")
+        normalized = os.path.normpath(candidate)
+        if normalized not in seen:
+            seen.add(normalized)
+            paths.append(candidate)
+    return paths
+
+
 def register_tts_engine_paths(engine_name: str, custom_paths: Dict[str, str]):
     """Register custom paths for a specific TTS engine"""
     return _tts_paths_manager.register_tts_engine_paths(engine_name, custom_paths)

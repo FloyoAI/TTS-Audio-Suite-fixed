@@ -138,8 +138,9 @@ class RVCEngine:
             rvc_models = []
             hubert_models = []
             
-            # Look for RVC models - try TTS path first, then legacy
+            # Look for RVC models - trained models live in models/loras, base/legacy stay under TTS/RVC
             rvc_search_paths = [
+                os.path.join(models_dir, "loras"),
                 os.path.join(models_dir, "TTS", "RVC"),
                 os.path.join(models_dir, "RVC")  # Legacy
             ]

@@ -597,7 +597,7 @@ Hello! Welcome to our multilingual show.
 **Important notes:**
 
 - Training job logs, resumable checkpoints, and progress files go under `ComfyUI/output/tts_audio_suite_training/rvc/`
-- Final trained `.pth` models and `.index` files go under `ComfyUI/models/TTS/RVC/`
+- Final trained `.pth` models and `.index` files go under `ComfyUI/models/loras/`
 - `save_best_model` is only a low-loss inference candidate, not a magical quality oracle. You still need to listen.
 
 </details>
@@ -1039,7 +1039,7 @@ Per-segment overrides are supported with `[]` parameter syntax for whole-segment
 **Training status:**
 
 * **Initial MOSS LoRA training support is now integrated** through the unified `🎓 Model Training` flow.
-* Current scope is **MOSS-TTS 8B (Delay) LoRA training** with local adapter export into `models/TTS/moss_tts/loras/`.
+* Current scope is **MOSS-TTS 8B (Delay) LoRA training** with local adapter export into `models/loras/`.
 * The LAION Voice Acting 8B community checkpoint is accepted by the same training path because it uses the v1.5 Delay architecture, but full inference/training validation is pending community feedback.
 * Dataset-building UX is still early and will need refinement, but the end-to-end workflow is functional.
 

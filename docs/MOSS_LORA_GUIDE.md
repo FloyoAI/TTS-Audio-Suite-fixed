@@ -4,16 +4,16 @@ This guide defines the local adapter layout and loading behavior for **MOSS-TTS 
 
 ## Local Folder Layout
 
-MOSS LoRA adapters should live under:
+MOSS LoRA adapters should live under ComfyUI's standard LoRA folder:
 
 ```text
-ComfyUI/models/TTS/moss_tts/loras/
+ComfyUI/models/loras/
 ```
 
 Each adapter must have its **own folder**:
 
 ```text
-ComfyUI/models/TTS/moss_tts/loras/
+ComfyUI/models/loras/
   MyNorwegianLoRA/
     adapter_config.json
     adapter_model.safetensors
@@ -35,6 +35,8 @@ Also accepted:
   adapter_model.bin
 ```
 
+Adapters previously stored in `ComfyUI/models/TTS/moss_tts/loras/` are still discovered as a fallback.
+
 ## Required Files
 
 Each adapter folder must contain:
@@ -55,7 +57,7 @@ Extra files are allowed, for example:
 Do not place loose adapter files directly inside:
 
 ```text
-ComfyUI/models/TTS/moss_tts/loras/
+ComfyUI/models/loras/
 ```
 
 This is **not** a supported layout:
@@ -73,14 +75,15 @@ loras/
   MyLoRA.safetensors
 ```
 
-One adapter must always be one folder.
+One adapter must always be one folder. Regular ComfyUI diffusion LoRA files in the same directory are ignored by the MOSS dropdown.
 
 ## Engine Node Behavior
 
 The MOSS engine node supports two adapter paths:
 
 1. **Local LoRA dropdown**
-   - lists valid adapter folders discovered under `models/TTS/moss_tts/loras`
+   - lists valid adapter folders discovered under `models/loras`
+   - also still lists adapters found under the legacy `models/TTS/moss_tts/loras` path
 
 2. **Advanced override field**
    - accepts:
@@ -90,7 +93,7 @@ The MOSS engine node supports two adapter paths:
 If you enter a Hugging Face repo id, TTS Audio Suite installs it into:
 
 ```text
-ComfyUI/models/TTS/moss_tts/loras/<owner__repo>/
+ComfyUI/models/loras/<owner__repo>/
 ```
 
 Then it loads the adapter from that local folder.
@@ -102,16 +105,15 @@ TTS Audio Suite does **not** use Hugging Face cache as the final managed storage
 This layout keeps adapters:
 
 - visible in the MOSS dropdown
-- stored inside the normal TTS model tree
-- ready for future training output
-- separate from ComfyUI diffusion LoRA folders
+- stored in ComfyUI's standard `models/loras` folder
+- ready for training output and inference from the same location
 
 ## Training Output Standard
 
-Future MOSS training should write adapters in exactly this format:
+MOSS training writes adapters in exactly this format:
 
 ```text
-ComfyUI/models/TTS/moss_tts/loras/<run_name>/
+ComfyUI/models/loras/<run_name>/
   adapter_config.json
   adapter_model.safetensors
 ```
