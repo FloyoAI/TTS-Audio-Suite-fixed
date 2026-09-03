@@ -260,12 +260,29 @@ def get_all_loras_paths() -> List[str]:
         models_dir = getattr(folder_paths, "models_dir", None)
         if models_dir:
             loras_dirs = [os.path.join(models_dir, "loras")]
+    # Floyo user LoRAs are materialized under ComfyUI/#models/loras
+    base_path = getattr(folder_paths, "base_path", None)
+    if base_path:
+        floyo_loras = os.path.join(base_path, "#models", "loras")
+        normalized = {os.path.normpath(path) for path in loras_dirs}
+        if os.path.normpath(floyo_loras) not in normalized:
+            loras_dirs.append(floyo_loras)
     return [path for path in loras_dirs if path]
 
 
 def get_preferred_loras_path() -> str:
-    """Primary ComfyUI loras directory for new LoRA/adapter/training output."""
+    """Primary loras directory for new LoRA/adapter/training output.
+
+    Prefer Floyo's watched ``#models/loras`` folder when present so uploaded
+    and trained adapters persist. The first registered loras path is often the
+    shared SSD cache, which Floyo does not sync back to the user.
+    """
     paths = get_all_loras_paths()
+    for path in paths:
+        normalized = path.replace("\\", "/")
+        if normalized.rstrip("/").endswith("#models/loras"):
+            os.makedirs(path, exist_ok=True)
+            return path
     if paths:
         os.makedirs(paths[0], exist_ok=True)
         return paths[0]
@@ -285,6 +302,70 @@ def get_legacy_moss_lora_paths() -> List[str]:
             seen.add(normalized)
             paths.append(candidate)
     return paths
+
+
+def is_floyo_loras_dir(path: str) -> bool:
+    return str(path or "").replace("\\", "/").rstrip("/").endswith("#models/loras")
+
+
+def normalize_lora_ref(value: str) -> str:
+    """Strip Floyo / local: prefixes down to a path relative to models/loras."""
+    text = str(value or "").strip().replace("\\", "/")
+    if text.startswith("local:"):
+        text = text[6:]
+    lowered = text.lower()
+    prefixes = (
+        "(as-input)#models/loras/",
+        "(as-output)#models/loras/",
+        "#models/loras/",
+        "models/loras/",
+    )
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return text.lstrip("/")
+
+
+def resolve_loras_adapter_dir(name: str) -> Optional[str]:
+    """Resolve a PEFT adapter folder under registered loras paths."""
+    raw = str(name or "").strip()
+    if not raw:
+        return None
+    if os.path.isdir(raw) and os.path.isfile(os.path.join(raw, "adapter_config.json")):
+        return raw
+
+    relative = normalize_lora_ref(raw)
+    if not relative:
+        return None
+    if os.path.isdir(relative) and os.path.isfile(os.path.join(relative, "adapter_config.json")):
+        return relative
+
+    search_roots = list(get_all_loras_paths()) + get_legacy_moss_lora_paths()
+    try:
+        input_dir = folder_paths.get_input_directory()
+    except Exception:
+        input_dir = None
+    if input_dir:
+        search_roots.extend(
+            [
+                os.path.join(input_dir, "models", "loras"),
+                os.path.join(input_dir, "#models", "loras"),
+            ]
+        )
+
+    seen = set()
+    for root in search_roots:
+        if not root:
+            continue
+        normalized = os.path.normpath(root)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        candidate = os.path.join(normalized, relative)
+        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "adapter_config.json")):
+            return candidate
+    return None
 
 
 def register_tts_engine_paths(engine_name: str, custom_paths: Dict[str, str]):

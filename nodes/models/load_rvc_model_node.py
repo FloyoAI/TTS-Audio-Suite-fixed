@@ -219,6 +219,64 @@ class LoadRVCModelNode(BaseTTSNode):
                 return [os.path.join(folder_paths.models_dir, "loras")]
             return []
 
+    @staticmethod
+    def _normalize_lora_ref(value: str) -> str:
+        """Strip Floyo / local: prefixes down to a path relative to models/loras."""
+        text = str(value or "").strip().replace("\\", "/")
+        if text.startswith("local:"):
+            text = text[6:]
+        lowered = text.lower()
+        prefixes = (
+            "(as-input)#models/loras/",
+            "(as-output)#models/loras/",
+            "#models/loras/",
+            "models/loras/",
+        )
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                text = text[len(prefix):]
+                break
+        return text.lstrip("/")
+
+    @classmethod
+    def _resolve_loras_file(cls, filename: str):
+        """Find a file under ComfyUI's registered loras folders."""
+        relative = cls._normalize_lora_ref(filename)
+        if not relative:
+            return None
+
+        if folder_paths:
+            try:
+                full_path = folder_paths.get_full_path("loras", relative)
+                if full_path and os.path.exists(full_path):
+                    return full_path
+            except Exception:
+                pass
+
+        for loras_dir in cls._iter_loras_search_dirs():
+            candidate = os.path.join(loras_dir, relative)
+            if os.path.exists(candidate):
+                return candidate
+
+        if folder_paths:
+            base_path = getattr(folder_paths, "base_path", None)
+            if base_path:
+                candidate = os.path.join(base_path, "#models", "loras", relative)
+                if os.path.exists(candidate):
+                    return candidate
+            try:
+                input_dir = folder_paths.get_input_directory()
+            except Exception:
+                input_dir = None
+            if input_dir:
+                for candidate in (
+                    os.path.join(input_dir, "models", "loras", relative),
+                    os.path.join(input_dir, "#models", "loras", relative),
+                ):
+                    if os.path.exists(candidate):
+                        return candidate
+        return None
+
     @classmethod
     def _iter_local_rvc_index_paths(cls):
         seen = set()
@@ -387,13 +445,13 @@ class LoadRVCModelNode(BaseTTSNode):
                 "Monika.pth"
             ]
         
-        # Add local models from models/loras first (trained character models)
+        # Add models from models/loras (Floyo uploads / trained adapters).
+        # Use the bare filename so Floyo can sync `#models/loras/<name>.pth`.
         try:
             for loras_dir in cls._iter_loras_search_dirs():
                 for relative_path, _ in cls._iter_files_shallow(loras_dir, ".pth"):
-                    local_model = f"local:{relative_path}"
-                    if local_model not in models:
-                        models.append(local_model)
+                    if relative_path not in models:
+                        models.append(relative_path)
         except Exception:
             pass
 
@@ -456,13 +514,12 @@ class LoadRVCModelNode(BaseTTSNode):
         try:
             for loras_dir in cls._iter_loras_search_dirs():
                 for relative_path, _ in cls._iter_files_shallow(loras_dir, ".index"):
-                    local_index = f"local:{relative_path}"
-                    if local_index not in indexes:
-                        indexes.append(local_index)
+                    if relative_path not in indexes:
+                        indexes.append(relative_path)
                 for relative_path, _ in cls._iter_files_shallow(os.path.join(loras_dir, ".index"), ".index"):
-                    local_index = f"local:.index/{relative_path}" if not relative_path.startswith(".index/") else f"local:{relative_path}"
-                    if local_index not in indexes:
-                        indexes.append(local_index)
+                    index_name = f".index/{relative_path}" if not relative_path.startswith(".index/") else relative_path
+                    if index_name not in indexes:
+                        indexes.append(index_name)
         except Exception:
             pass
 
@@ -514,14 +571,12 @@ class LoadRVCModelNode(BaseTTSNode):
     def _get_model_path(self, model_name, auto_download=True):
         """Get full path to RVC model file (respects extra_model_paths.yaml)."""
         try:
-            # Handle local: prefix (like F5-TTS pattern)
-            if model_name.startswith("local:"):
-                actual_model_name = model_name.replace("local:", "")
-
-                for loras_dir in self._iter_loras_search_dirs():
-                    model_path = os.path.join(loras_dir, actual_model_name)
-                    if os.path.exists(model_path):
-                        return model_path
+            # Handle local: prefix (like F5-TTS pattern) and Floyo lora refs
+            if model_name.startswith("local:") or "loras/" in str(model_name).replace("\\", "/") or str(model_name).startswith("#models"):
+                actual_model_name = self._normalize_lora_ref(model_name)
+                loras_path = self._resolve_loras_file(actual_model_name)
+                if loras_path:
+                    return loras_path
 
                 # Search in extra_model_paths.yaml first
                 try:
@@ -551,13 +606,14 @@ class LoadRVCModelNode(BaseTTSNode):
             
             # Regular downloadable or locally trained model
             if folder_paths:
+                loras_path = self._resolve_loras_file(model_name)
+                if loras_path:
+                    return loras_path
+
                 models_dir = folder_paths.models_dir
-                loras_path = os.path.join(models_dir, "loras", model_name)
                 tts_path = os.path.join(models_dir, "TTS", "RVC", model_name)
                 legacy_path = os.path.join(models_dir, "RVC", model_name)
 
-                if os.path.exists(loras_path):
-                    return loras_path
                 if os.path.exists(tts_path):
                     return tts_path
                 if os.path.exists(legacy_path):
@@ -578,17 +634,14 @@ class LoadRVCModelNode(BaseTTSNode):
         """Get full path to RVC index file (respects extra_model_paths.yaml)."""
         try:
             # Handle local: prefix (like F5-TTS pattern)
-            if index_name.startswith("local:"):
-                actual_index_name = index_name.replace("local:", "")
-
-                for loras_dir in self._iter_loras_search_dirs():
-                    index_paths = [
-                        os.path.join(loras_dir, ".index", actual_index_name.replace(".index/", "")),
-                        os.path.join(loras_dir, actual_index_name),
-                    ]
-                    for index_path in index_paths:
-                        if os.path.exists(index_path):
-                            return index_path
+            if index_name.startswith("local:") or "loras/" in str(index_name).replace("\\", "/") or str(index_name).startswith("#models"):
+                actual_index_name = self._normalize_lora_ref(index_name)
+                loras_index = self._resolve_loras_file(actual_index_name)
+                if loras_index:
+                    return loras_index
+                loras_index = self._resolve_loras_file(os.path.join(".index", os.path.basename(actual_index_name.replace(".index/", ""))))
+                if loras_index:
+                    return loras_index
 
                 # Search in extra_model_paths.yaml first
                 try:
@@ -622,6 +675,13 @@ class LoadRVCModelNode(BaseTTSNode):
             
             # Regular downloadable index
             if folder_paths:
+                loras_index = self._resolve_loras_file(index_name)
+                if loras_index:
+                    return loras_index
+                loras_index = self._resolve_loras_file(os.path.join(".index", os.path.basename(index_name)))
+                if loras_index:
+                    return loras_index
+
                 models_dir = folder_paths.models_dir
                 # Try TTS path first, then legacy
                 tts_path = os.path.join(models_dir, "TTS", "RVC", ".index", index_name)

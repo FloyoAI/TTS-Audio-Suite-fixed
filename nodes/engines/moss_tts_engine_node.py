@@ -30,6 +30,8 @@ from utils.models.extra_paths import (
     get_all_tts_model_paths,
     get_legacy_moss_lora_paths,
     get_preferred_loras_path,
+    is_floyo_loras_dir,
+    resolve_loras_adapter_dir,
 )
 from utils.downloads.unified_downloader import UnifiedDownloader
 
@@ -398,6 +400,7 @@ class MossTTSEngineNode(BaseTTSNode):
                 continue
             seen.add(normalized)
             roots.append(root)
+        roots.sort(key=lambda path: (0 if is_floyo_loras_dir(path) else 1, path))
         return roots
 
     @classmethod
@@ -414,10 +417,10 @@ class MossTTSEngineNode(BaseTTSNode):
                         continue
                     if not os.path.exists(os.path.join(candidate, "adapter_config.json")):
                         continue
-                    label = f"local:{name}"
-                    if label not in seen:
-                        seen.add(label)
-                        discovered.append(label)
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    discovered.append(name)
         except Exception:
             pass
         return discovered
@@ -489,18 +492,18 @@ class MossTTSEngineNode(BaseTTSNode):
         if manual:
             if cls._looks_like_hf_repo_id(manual):
                 return cls._install_hf_lora_adapter(manual)
+            resolved_manual = resolve_loras_adapter_dir(manual)
+            if resolved_manual:
+                return resolved_manual
             return manual
 
         local_value = str(local_lora_adapter or "").strip()
         if not local_value or local_value == cls.NO_LORA_OPTION:
             return ""
 
-        if local_value.startswith("local:"):
-            adapter_name = local_value.split(":", 1)[1]
-            for lora_root in cls._iter_moss_lora_roots():
-                candidate = os.path.join(lora_root, adapter_name)
-                if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "adapter_config.json")):
-                    return candidate
+        resolved = resolve_loras_adapter_dir(local_value)
+        if resolved:
+            return resolved
 
         if cls._looks_like_hf_repo_id(local_value):
             return cls._install_hf_lora_adapter(local_value)
@@ -654,3 +657,8 @@ class MossTTSEngineNode(BaseTTSNode):
             "adapter_class": "MossTTSEngineAdapter",
             "capabilities": [model_role],
         },)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        """Allow LoRA names that are not on disk yet (Floyo uploads land after validation)."""
+        return True
