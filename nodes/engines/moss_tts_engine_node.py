@@ -31,7 +31,9 @@ from utils.models.extra_paths import (
     get_legacy_moss_lora_paths,
     get_preferred_loras_path,
     is_floyo_loras_dir,
+    normalize_lora_ref,
     resolve_loras_adapter_dir,
+    to_as_input_loras_path,
 )
 from utils.downloads.unified_downloader import UnifiedDownloader
 
@@ -420,7 +422,8 @@ class MossTTSEngineNode(BaseTTSNode):
                     if name in seen:
                         continue
                     seen.add(name)
-                    discovered.append(name)
+                    as_input_path = to_as_input_loras_path(name)
+                    discovered.append(as_input_path or name)
         except Exception:
             pass
         return discovered
@@ -482,6 +485,15 @@ class MossTTSEngineNode(BaseTTSNode):
         return target_dir
 
     @classmethod
+    def _missing_lora_adapter_error(cls, adapter_ref: str) -> RuntimeError:
+        name = str(adapter_ref or "").strip()
+        relative = normalize_lora_ref(name) or name
+        return RuntimeError(
+            f"MOSS LoRA adapter '{name}' was not found at #models/loras/{relative}. "
+            "Expected a PEFT adapter folder containing adapter_config.json."
+        )
+
+    @classmethod
     def _resolve_lora_adapter(
         cls,
         local_lora_adapter: str,
@@ -492,23 +504,25 @@ class MossTTSEngineNode(BaseTTSNode):
         if manual:
             if cls._looks_like_hf_repo_id(manual):
                 return cls._install_hf_lora_adapter(manual)
+            manual = to_as_input_loras_path(manual) or manual
             resolved_manual = resolve_loras_adapter_dir(manual)
             if resolved_manual:
                 return resolved_manual
-            return manual
+            raise cls._missing_lora_adapter_error(manual)
 
         local_value = str(local_lora_adapter or "").strip()
         if not local_value or local_value == cls.NO_LORA_OPTION:
             return ""
 
+        if cls._looks_like_hf_repo_id(local_value):
+            return cls._install_hf_lora_adapter(local_value)
+
+        local_value = to_as_input_loras_path(local_value) or local_value
         resolved = resolve_loras_adapter_dir(local_value)
         if resolved:
             return resolved
 
-        if cls._looks_like_hf_repo_id(local_value):
-            return cls._install_hf_lora_adapter(local_value)
-
-        return local_value
+        raise cls._missing_lora_adapter_error(local_value)
 
     @classmethod
     def _resolve_model_variant(cls, model_variant: str, multi_speaker_mode: str) -> str:

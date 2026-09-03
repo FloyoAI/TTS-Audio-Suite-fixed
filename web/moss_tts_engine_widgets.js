@@ -309,6 +309,62 @@ function hookWidgetValue(node, widget, callback) {
     });
 }
 
+function toAsInputLorasPath(value) {
+    const text = String(value || "").trim();
+    if (!text || text.toLowerCase() === "none") {
+        return value;
+    }
+    if (text.includes("://") || text.startsWith(".") || text.startsWith("~")) {
+        return value;
+    }
+    if (
+        !text.startsWith("#")
+        && !text.startsWith("(")
+        && !text.startsWith("models/")
+        && !text.startsWith("local:")
+    ) {
+        const parts = text.split("/");
+        if (parts.length === 2 && parts[0] && parts[1]) {
+            return value;
+        }
+    }
+
+    let rest = text.startsWith("local:") ? text.slice(6) : text;
+    const prefixes = [
+        "(as-input)#models/loras/",
+        "(as-output)#models/loras/",
+        "#models/loras/",
+        "models/loras/",
+    ];
+    const lowered = rest.toLowerCase();
+    for (const prefix of prefixes) {
+        if (lowered.startsWith(prefix)) {
+            rest = rest.slice(prefix.length);
+            break;
+        }
+    }
+    rest = rest.replace(/^\/+/, "");
+    if (!rest) {
+        return value;
+    }
+    return `(as-input)#models/loras/${rest}`;
+}
+
+function hookLoraAsInputSerialize(node, widgetName) {
+    const widget = findWidgetByName(node, widgetName);
+    if (!widget || widget.__ttsMossLoraAsInputHooked) {
+        return;
+    }
+    widget.__ttsMossLoraAsInputHooked = true;
+    const originalSerialize = widget.serializeValue;
+    widget.serializeValue = async (serializeNode, index) => {
+        const current = typeof originalSerialize === "function"
+            ? await originalSerialize.call(widget, serializeNode, index)
+            : widget.value;
+        return toAsInputLorasPath(current);
+    };
+}
+
 app.registerExtension({
     name: "tts-audio-suite.moss-tts.widgets",
     nodeCreated(node) {
@@ -317,6 +373,8 @@ app.registerExtension({
         }
 
         refreshMossWidgets(node);
+        hookLoraAsInputSerialize(node, "local_lora_adapter");
+        hookLoraAsInputSerialize(node, "lora_adapter_override");
 
         hookWidgetValue(node, findWidgetByName(node, "multi_speaker_mode"), refreshMossWidgets);
         hookWidgetValue(node, findWidgetByName(node, "model_variant"), refreshMossWidgets);

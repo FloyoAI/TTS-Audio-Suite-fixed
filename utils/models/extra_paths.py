@@ -249,6 +249,31 @@ def get_all_voices_paths() -> List[str]:
     return _tts_paths_manager.get_all_voices_paths()
 
 
+def _comfy_base_path() -> Optional[str]:
+    return getattr(folder_paths, "base_path", None) or None
+
+
+def get_floyo_loras_path() -> Optional[str]:
+    """Absolute ComfyUI/#models/loras path Floyo materializes user LoRAs into."""
+    base_path = _comfy_base_path()
+    if not base_path:
+        return None
+    return os.path.join(base_path, "#models", "loras")
+
+
+def _absolute_under_comfy(path: str) -> str:
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    base_path = _comfy_base_path()
+    if base_path:
+        return os.path.normpath(os.path.join(base_path, path))
+    return os.path.normpath(os.path.abspath(path))
+
+
+def _is_peft_adapter_dir(path: str) -> bool:
+    return os.path.isdir(path) and os.path.isfile(os.path.join(path, "adapter_config.json"))
+
+
 def get_all_loras_paths() -> List[str]:
     """Return ComfyUI's registered models/loras directories."""
     loras_dirs: List[str] = []
@@ -260,14 +285,11 @@ def get_all_loras_paths() -> List[str]:
         models_dir = getattr(folder_paths, "models_dir", None)
         if models_dir:
             loras_dirs = [os.path.join(models_dir, "loras")]
-    # Floyo user LoRAs are materialized under ComfyUI/#models/loras
-    base_path = getattr(folder_paths, "base_path", None)
-    if base_path:
-        floyo_loras = os.path.join(base_path, "#models", "loras")
-        normalized = {os.path.normpath(path) for path in loras_dirs}
-        if os.path.normpath(floyo_loras) not in normalized:
-            loras_dirs.append(floyo_loras)
-    return [path for path in loras_dirs if path]
+    floyo_loras = get_floyo_loras_path()
+    normalized = {_absolute_under_comfy(path) for path in loras_dirs if path}
+    if floyo_loras and os.path.normpath(floyo_loras) not in normalized:
+        loras_dirs.append(floyo_loras)
+    return [_absolute_under_comfy(path) for path in loras_dirs if path]
 
 
 def get_preferred_loras_path() -> str:
@@ -327,19 +349,57 @@ def normalize_lora_ref(value: str) -> str:
     return text.lstrip("/")
 
 
+def to_as_input_loras_path(value: str) -> Optional[str]:
+    """Rewrite ``#models/loras/X`` to ``(as-input)#models/loras/X``.
+
+    Floyo only downloads LoRA *folders* when the prompt uses the as-input prefix.
+    Bare ``#models/loras/<folder>`` is treated as an output directory.
+    """
+    text = str(value or "").strip()
+    if not text or text.lower() == "none":
+        return None
+    if text.startswith("local:"):
+        text = text[6:]
+    if (
+        "/" in text
+        and not text.startswith("#")
+        and not text.startswith("(")
+        and not text.startswith("models/")
+        and "://" not in text
+    ):
+        parts = text.split("/")
+        if len(parts) == 2 and all(parts):
+            return None
+    relative = normalize_lora_ref(text)
+    if not relative:
+        return None
+    return f"(as-input)#models/loras/{relative}"
+
+
 def resolve_loras_adapter_dir(name: str) -> Optional[str]:
-    """Resolve a PEFT adapter folder under registered loras paths."""
+    """Resolve a PEFT adapter folder, preferring Floyo ``#models/loras``."""
     raw = str(name or "").strip()
     if not raw:
         return None
-    if os.path.isdir(raw) and os.path.isfile(os.path.join(raw, "adapter_config.json")):
-        return raw
+
+    for candidate in (raw, _absolute_under_comfy(raw)):
+        if _is_peft_adapter_dir(candidate):
+            return candidate
 
     relative = normalize_lora_ref(raw)
     if not relative:
         return None
-    if os.path.isdir(relative) and os.path.isfile(os.path.join(relative, "adapter_config.json")):
+    if _is_peft_adapter_dir(relative):
         return relative
+    absolute_relative = _absolute_under_comfy(relative)
+    if _is_peft_adapter_dir(absolute_relative):
+        return absolute_relative
+
+    floyo_root = get_floyo_loras_path()
+    if floyo_root:
+        floyo_candidate = os.path.join(floyo_root, relative)
+        if _is_peft_adapter_dir(floyo_candidate):
+            return floyo_candidate
 
     search_roots = list(get_all_loras_paths()) + get_legacy_moss_lora_paths()
     try:
@@ -358,12 +418,12 @@ def resolve_loras_adapter_dir(name: str) -> Optional[str]:
     for root in search_roots:
         if not root:
             continue
-        normalized = os.path.normpath(root)
+        normalized = _absolute_under_comfy(root)
         if normalized in seen:
             continue
         seen.add(normalized)
         candidate = os.path.join(normalized, relative)
-        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "adapter_config.json")):
+        if _is_peft_adapter_dir(candidate):
             return candidate
     return None
 
